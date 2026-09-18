@@ -8,7 +8,8 @@
 
 Set-StrictMode -Version Latest
 
-$script:SessionIdPattern = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+# \A and \z, not ^ and $: in .NET `$` also matches before a final line feed.
+$script:SessionIdPattern = '\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\z'
 
 # The documented ceiling for a Run/RunOnce value. A longer value is not rejected
 # when written -- it just never runs at logon, with nothing logged anywhere.
@@ -131,13 +132,21 @@ function Get-ClaudeArgs {
     return , $argv.ToArray()
 }
 
+# True when `claude` is a batch shim (an npm install puts claude.cmd on PATH).
+# cmd.exe re-parses whatever is handed to a shim -- &, |, <, >, %VAR% and line
+# feeds are all live there -- so a prompt must never travel on its command line.
+function Test-ClaudeShim {
+    param([string]$Path)
+    return [bool]($Path -and $Path -match '\.(cmd|bat)\z')
+}
+
 # --- command lines -----------------------------------------------------------------
 # Standard Win32 argv quoting (what CommandLineToArgvW undoes).
 function ConvertTo-QuotedArgument {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
     if ($Value -ne '' -and $Value -notmatch '[\s"]') { return $Value }
     $escaped = $Value -replace '(\\*)"', '$1$1\"'   # backslashes before a quote double up
-    $escaped = $escaped -replace '(\\+)$', '$1$1'   # ...and so do trailing ones
+    $escaped = $escaped -replace '(\\+)\z', '$1$1'  # ...and so do trailing ones
     return '"' + $escaped + '"'
 }
 
@@ -207,7 +216,9 @@ function Get-NextTempIndex {
         [string]$RootSlug
     )
     $max = 0
-    $leaf = '^' + [regex]::Escape($Prefix) + '(\d*)$'
+    # At most nine digits: that always fits an Int32, and a folder such as
+    # "<prefix>20240101120000" is somebody's timestamp, not one of our indexes.
+    $leaf = '^' + [regex]::Escape($Prefix) + '(\d{0,9})$'
     foreach ($n in @($DiskNames)) {
         if ($n -match $leaf) {
             $i = if ($Matches[1]) { [int]$Matches[1] } else { 0 }   # bare "<prefix>" is 0, not 1
@@ -215,7 +226,7 @@ function Get-NextTempIndex {
         }
     }
     if ($RootSlug) {
-        $slugRx = '^' + [regex]::Escape($RootSlug + '-' + ($Prefix -replace '[^A-Za-z0-9]', '-')) + '(\d*)$'
+        $slugRx = '^' + [regex]::Escape($RootSlug + '-' + ($Prefix -replace '[^A-Za-z0-9]', '-')) + '(\d{0,9})$'
         foreach ($s in @($HistorySlugs)) {
             if ($s -cmatch $slugRx) {
                 $i = if ($Matches[1]) { [int]$Matches[1] } else { 0 }

@@ -62,8 +62,9 @@ Workspace aliases are personal, so they live outside the plugin, in
 ```
 
 `triggers` are the phrases that mean this folder. `note` tells Claude what to do with an ambiguous
-mention, in your own words. `confirm: true` makes Claude ask before opening even on a match. The
-older flat form `{ "name": "path" }` still loads. Ask Claude to "add an alias" and it edits this file
+mention, in your own words. `confirm: true` makes Claude ask before opening even on a match. `path`
+is an absolute path; `%VAR%` references such as `%USERPROFILE%` are expanded, in `tempTask.root` too.
+The older flat form `{ "name": "path" }` still loads. Ask Claude to "add an alias" and it edits this file
 — never the skill.
 
 ## How each part works
@@ -95,6 +96,24 @@ reboot-commit.ps1 -Token <t>
 
 - `reboot-commit.ps1` is the **only** file that can restart Windows or write the RunOnce value; the
   test suite enforces that. Keep it out of your permission allowlist — its prompt is the last lock.
+- `plan.json` is just a file, so the commit step takes nothing executable from it: the RunOnce command
+  must be, token for token, the shape the plan step renders, naming an installed PowerShell (and
+  Windows Terminal), and it is re-rendered before it is registered. A plan whose RunOnce command or
+  frozen-script path was edited is refused (`PLAN_INVALID`), as is one older than ten minutes or
+  dated in the future. The folder, session id and prompt are replayed as found, so `plan.json` is as
+  sensitive as `state.json` — this guards the command that runs at logon, not the whole state folder.
+- The session to resume is settled **before** the reboot: an explicit id must have an interactive
+  transcript recorded in that folder, otherwise the running session (`CLAUDE_CODE_SESSION_ID`), then
+  the newest interactive transcript in the folder. No match means a fresh session carrying the
+  prompt — and the plan says so.
+- The prompt is passed to `claude.exe` as one argument after `--` (on Windows PowerShell 5.1 and
+  pwsh 7.0–7.2, which build native command lines loosely, the resume script renders the command
+  line itself). If `claude` is an npm-style `.cmd`
+  shim, it is **never** put on the command line — `cmd.exe` would interpret `&`, `|`, `%VAR%` and
+  quotes in it and drop everything after the first line — but written to `resume-prompt.txt`, and
+  the command line only points at that file.
+- If the saved folder is missing at logon (a drive not connected yet), nothing is launched and the
+  state is kept, so the resume can be run again by hand.
 - RunOnce points at a **frozen copy** of the resume script, never into the plugin: an installed plugin
   lives in a versioned cache directory, and an update before the next logon would otherwise leave a
   dead entry that fails silently.
@@ -115,8 +134,9 @@ from a trusted parent folder.
 
 Everything lives in `%USERPROFILE%\.claude\claude-session-kit\` — `aliases.json`, `sessions.jsonl`
 (registry), `plan.json` / `state.json` / `state.last.json` (reboot), `next-prompt.txt`,
-`runtime\resume.ps1` (frozen copy), `kit.log`. The continuation prompt is stored in the state files
-because the resume needs it; it is **never** written to the log or echoed by `-Status`.
+`resume-prompt.txt` (only with a `.cmd` shim), `runtime\resume.ps1` (frozen copy), `kit.log`. The
+continuation prompt is stored in the state files because the resume needs it; it is **never** written
+to the log (which records its length and a short hash prefix) or echoed by `-Status`.
 
 ## Scripts
 
@@ -126,7 +146,7 @@ All under `skills/session/scripts/`, all print one JSON object (`ok`, `code`, `m
 |---|---|---|
 | `list-aliases.ps1` | the alias table | none |
 | `list-sessions.ps1` | sessions that could be resumed | none |
-| `list-candidates.ps1` | most-used folders without an alias | none |
+| `list-candidates.ps1` | most-used folders (`alias` is set on those already registered) | none |
 | `new-temp-task.ps1` | new scratch folder + new session | folder, terminal tab |
 | `open-workspace.ps1 -Alias\|-Path` | new session in a workspace | terminal tab |
 | `resume-session.ps1 [-Alias\|-Path] [-SessionId]` | reopen a session | terminal tab |
@@ -142,13 +162,25 @@ pwsh -NoProfile -File tests/run-tests.ps1
 
 No Pester, no network. Runs in a throwaway sandbox (`CLAUDE_SESSION_KIT_HOME`, `CLAUDE_CONFIG_DIR`),
 opens no tab, schedules no reboot, and asserts the exact RunOnce string, `wt` argument list and
-`claude` argv.
+`claude` argv. The resume script is run for real, but only against stand-ins for `claude` — a `.cmd`
+shim and a small argv-recording `.exe` — fed a prompt full of quotes, `&`, `%VAR%` and line breaks.
+Forged `plan.json` files are committed (`-Simulate`) to check that each one is refused.
 
 ## Uninstall
 
+First make sure no resume is pending — ask Claude to "cancel any pending reboot resume", or run the
+cancel script yourself (for a plugin install it sits under
+`~\.claude\plugins\cache\claude-session-kit\claude-session-kit\<version>\`):
+
 ```powershell
-pwsh -NoProfile -File "<plugin>\skills\session\scripts\reboot-cancel.ps1"   # make sure nothing is pending
-claude plugin uninstall claude-session-kit                                   # or delete the cloned folder
+pwsh -NoProfile -File "$env:USERPROFILE\.claude\skills\claude-session-kit\skills\session\scripts\reboot-cancel.ps1"
+```
+
+Then:
+
+```powershell
+claude plugin uninstall claude-session-kit@claude-session-kit                # or delete the cloned folder
+claude plugin marketplace remove claude-session-kit
 Remove-Item -Recurse -Force "$env:USERPROFILE\.claude\claude-session-kit"    # aliases, registry, logs
 ```
 

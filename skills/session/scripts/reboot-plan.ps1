@@ -11,9 +11,11 @@
   reboot-commit.ps1 -Token <token> does that, and only from an unexpired plan.
 
   Which session is resumed:
-    1. -SessionId
-    2. CLAUDE_SESSION_ID, if its transcript really is in this folder's project
-    3. the newest INTERACTIVE transcript in this folder (never a scheduled/SDK one)
+    1. -SessionId -- refused (SESSION_REJECTED) unless its transcript exists, is an
+       interactive CLI conversation and was recorded in this folder
+    2. CLAUDE_CODE_SESSION_ID, the running session, under the same three conditions
+    3. the newest INTERACTIVE transcript in this folder (never a scheduled/SDK one),
+       or this session's own sidecar while it is under ten minutes old
     4. none -> a FRESH session carrying the prompt. `claude --continue` is never
        used: it would reopen whatever conversation is newest, an automation's included.
 
@@ -58,7 +60,8 @@ try {
         if (-not (Test-Path -LiteralPath $PromptFile -PathType Leaf)) {
             Exit-WithResult ([ordered]@{ ok = $false; code = 'PROMPT_NOT_FOUND'; path = $PromptFile; message = 'The prompt file does not exist. Nothing was planned.' })
         }
-        $Prompt = (Get-Content -LiteralPath $PromptFile -Raw -Encoding UTF8).Trim()
+        # -Raw yields nothing at all for a zero-byte file; interpolation turns that into ''.
+        $Prompt = "$(Get-Content -LiteralPath $PromptFile -Raw -Encoding UTF8)".Trim()
     }
     if (-not $Prompt) {
         $Prompt = 'The machine has been rebooted as planned. Read the notes left before the reboot and continue the task from where we left off.'
@@ -76,31 +79,58 @@ try {
     if (-not $claude) {
         Exit-WithResult ([ordered]@{ ok = $false; code = 'CLAUDE_NOT_FOUND'; message = 'The claude executable was not found, so nothing could be resumed after the reboot. Nothing was planned.' })
     }
+    $shim = Test-ClaudeShim $claude
 
     # --- which session ---------------------------------------------------------
+    # A sidecar is the session asking for this reboot, still buffering its first
+    # lines -- but only while it is fresh. An old one is a conversation that was
+    # never written out, and `--resume` on it finds nothing.
+    $live = (Get-Date).AddMinutes(-10)
     $sessionSource = $null
     $projectDir = Get-ProjectTranscriptDir $WorkDir
+
+    # Why a given id cannot be planned, or $null when it can. An ALLOWLIST, like the
+    # rest of the kit: the transcript has to exist, be an interactive CLI conversation
+    # (or the asking session's own fresh sidecar), and belong to this folder. Anything
+    # less would only fail after the machine is already down.
+    function Get-SessionProblem([string]$Id) {
+        $t = Join-Path $projectDir ($Id + '.jsonl')
+        if (-not (Test-Path -LiteralPath $t)) {
+            $t = $null
+            foreach ($d in @(Get-ChildItem -LiteralPath (Get-ClaudeProjectsDir) -Directory -ErrorAction SilentlyContinue)) {
+                $c = Join-Path $d.FullName ($Id + '.jsonl')
+                if (Test-Path -LiteralPath $c) { $t = $c; break }
+            }
+        }
+        if (-not $t) { return @{ message = 'No transcript exists for that session id, so there would be nothing to resume after the reboot.' } }
+        $rec = Get-ClaudeSessionRecord -TranscriptPath $t
+        $ok = $rec.Kind -eq 'interactive' -or ($rec.Kind -eq 'sidecar' -and $rec.LastWrite -ge $live)
+        if (-not $ok) { return @{ kind = $rec.Kind; message = 'That session is not an interactive CLI session. Scheduled and SDK runs are never resumed.' } }
+        $here = if ($rec.Cwd) { Test-PathEqual $rec.Cwd $WorkDir } else { (Split-Path -Parent $t) -ieq $projectDir }
+        if (-not $here) { return @{ recordedCwd = $rec.Cwd; message = 'That session was recorded in another folder. Plan again with -WorkDir set to the folder it belongs to.' } }
+        return $null
+    }
+
+    # Claude Code exports the id of the running session; the older name is kept for
+    # one release.
+    $envSid = if ($env:CLAUDE_CODE_SESSION_ID) { $env:CLAUDE_CODE_SESSION_ID } else { $env:CLAUDE_SESSION_ID }
+
     if ($SessionId) {
         if (-not (Test-SessionIdFormat $SessionId)) {
             Exit-WithResult ([ordered]@{ ok = $false; code = 'SESSION_REJECTED'; sessionId = $SessionId; message = 'That is not a session id.' })
         }
-        $t = Join-Path $projectDir ($SessionId + '.jsonl')
-        if (Test-Path -LiteralPath $t) {
-            $rec = Get-ClaudeSessionRecord -TranscriptPath $t
-            if ($rec.Kind -eq 'automated') {
-                Exit-WithResult ([ordered]@{ ok = $false; code = 'SESSION_REJECTED'; sessionId = $SessionId; message = 'That session belongs to a scheduled or SDK run and is never resumed.' })
-            }
+        $problem = Get-SessionProblem $SessionId
+        if ($problem) {
+            $r = [ordered]@{ ok = $false; code = 'SESSION_REJECTED'; sessionId = $SessionId }
+            foreach ($k in $problem.Keys) { $r[$k] = $problem[$k] }
+            $r.message = $r.message + ' Nothing was planned.'
+            Exit-WithResult $r
         }
         $sessionSource = 'explicit'
-    } elseif ($env:CLAUDE_SESSION_ID -and (Test-SessionIdFormat $env:CLAUDE_SESSION_ID) -and
-        (Test-Path -LiteralPath (Join-Path $projectDir ($env:CLAUDE_SESSION_ID + '.jsonl')))) {
-        $SessionId = $env:CLAUDE_SESSION_ID
+    } elseif ((Test-SessionIdFormat $envSid) -and -not (Get-SessionProblem $envSid)) {
+        $SessionId = $envSid
         $sessionSource = 'env'
     } else {
-        # A sidecar is the session asking for this reboot, still buffering its first
-        # lines -- but only while it is fresh. An old one is a conversation that was
-        # never written out, and `--resume` on it finds nothing.
-        $live = (Get-Date).AddMinutes(-10)
         $newest = @(Get-ClaudeSessions -Path $WorkDir -Days 30 -Kinds @('interactive', 'sidecar')) |
             Where-Object { $_.Kind -eq 'interactive' -or $_.LastWrite -ge $live } | Select-Object -First 1
         if ($newest) { $SessionId = $newest.SessionId; $sessionSource = 'scan:' + $newest.Kind }
@@ -141,7 +171,6 @@ try {
         delay_seconds  = $DelaySeconds
         no_reboot      = [bool]$NoReboot
         runonce        = $runOnce
-        resume_source  = $resumeSource
         runtime_script = $runtimeScript
     }
     [IO.File]::WriteAllText((Get-KitPath plan), ($plan | ConvertTo-Json -Depth 5), [Text.UTF8Encoding]::new($false))
@@ -151,12 +180,12 @@ try {
             ok = $true; code = 'REBOOT_PLANNED'; token = $token; expiresInSeconds = 600
             workdir = $WorkDir; sessionMode = $sessionMode; sessionId = $SessionId; sessionSource = $sessionSource
             prompt = (Get-TextDigest $Prompt); delaySeconds = $DelaySeconds; willReboot = (-not $NoReboot)
-            runOnce = $runOnce
-            message = if ($sessionMode -eq 'fresh') {
-                'Planned. No resumable interactive session was identified, so a FRESH session carrying the prompt will start after logon. Nothing has been registered or scheduled yet.'
-            } else {
-                'Planned. Nothing has been registered or scheduled yet.'
-            }
+            runOnce = $runOnce; promptDelivery = $(if ($shim) { 'file' } else { 'argv' })
+            message = $(if ($sessionMode -eq 'fresh') {
+                    'Planned. No resumable interactive session was identified, so a FRESH session carrying the prompt will start after logon. Nothing has been registered or scheduled yet.'
+                } else {
+                    'Planned. Nothing has been registered or scheduled yet.'
+                }) + $(if ($shim) { ' Note: claude is a .cmd shim here, so after logon the prompt is handed over in resume-prompt.txt (state folder) and the command line only points at it.' } else { '' })
         })
 } catch {
     Write-KitResult -Ok $false -Code 'INTERNAL_ERROR' -Message $_.Exception.Message

@@ -25,9 +25,13 @@ function Get-ClaudeProjectsDir { return (Join-Path (Get-ClaudeHome) 'projects') 
 
 # CLAUDE_SESSION_KIT_HOME exists so the test suite can run against a scratch
 # directory instead of a person's real aliases and session registry.
+#
+# Returned in canonical form (no '..', no 8.3 short names): reboot-plan.ps1 renders
+# the RunOnce command from it and reboot-commit.ps1 compares that command with its
+# own idea of the path, so both have to arrive at the same string.
 function Get-KitRoot {
-    if ($env:CLAUDE_SESSION_KIT_HOME) { return $env:CLAUDE_SESSION_KIT_HOME }
-    return (Join-Path (Join-Path $env:USERPROFILE '.claude') $script:KitName)
+    $root = if ($env:CLAUDE_SESSION_KIT_HOME) { $env:CLAUDE_SESSION_KIT_HOME } else { Join-Path (Join-Path $env:USERPROFILE '.claude') $script:KitName }
+    return [IO.Path]::GetFullPath($root)
 }
 
 function Get-KitPath {
@@ -108,10 +112,13 @@ function Write-KitLog {
 # because the project slug preserves it while NTFS does not.
 function Resolve-WorkspacePath {
     param([Parameter(Mandatory)][string]$Path)
-    if ($Path.StartsWith('\\')) { return $null }   # UNC slugs are unverified: refuse rather than guess
+    # UNC slugs are unverified: refuse rather than guess. Windows accepts forward
+    # slashes too, and a relative or PSDrive path can still resolve to a share.
+    if ($Path -match '^[\\/]{2}') { return $null }
     if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return $null }
     $item = Get-Item -LiteralPath $Path -Force
     $full = $item.FullName
+    if ($full.StartsWith('\\')) { return $null }
     try {
         # Get-Item echoes the caller's casing; walking GetFileSystemInfos recovers the real one.
         $di = [IO.DirectoryInfo]::new($full)
@@ -211,13 +218,24 @@ function Test-WorkspaceTrusted {
 function Read-AliasDocument {
     $file = Get-KitPath aliases
     if (-not (Test-Path -LiteralPath $file)) { return $null }
-    return (Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json)
+    try {
+        return (Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json)
+    } catch {
+        # Reaches the model as INTERNAL_ERROR from whichever script needed an alias,
+        # so the message has to say which file to fix.
+        throw "aliases.json is not valid JSON ($file): $($_.Exception.Message)"
+    }
 }
 
 function Get-AliasTable {
     $doc = Read-AliasDocument
     if (-not $doc) { return }
-    return (ConvertFrom-AliasDocument -Document $doc)
+    # %USERPROFILE% and friends are expanded here, like tempTask.root, so a shared
+    # aliases.json need not spell out anybody's home folder.
+    foreach ($a in @(ConvertFrom-AliasDocument -Document $doc)) {
+        $a.path = [Environment]::ExpandEnvironmentVariables([string]$a.path)
+        $a
+    }
 }
 
 function Find-Alias {
@@ -433,12 +451,17 @@ function Resolve-ResumeTarget {
 
 # --- executables ------------------------------------------------------------------------------
 function Resolve-ClaudeBinary {
+    # An explicit override wins. resume-after-reboot.ps1 resolves in the same order.
+    if ($env:CLAUDE_CODE_BIN -and (Test-Path -LiteralPath $env:CLAUDE_CODE_BIN -PathType Leaf)) { return $env:CLAUDE_CODE_BIN }
     # -CommandType Application: a profile function or alias named `claude` must not win.
-    $cmd = Get-Command claude -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($cmd) { return $cmd.Source }
+    # A real .exe is preferred over an npm-style .cmd shim: a shim runs through cmd.exe,
+    # which is no place for free text (see Test-ClaudeShim).
+    $cmds = @(Get-Command claude -CommandType Application -All -ErrorAction SilentlyContinue)
+    $exe = $cmds | Where-Object { $_.Source -match '\.exe\z' } | Select-Object -First 1
+    if ($exe) { return $exe.Source }
+    if ($cmds.Count -gt 0) { return $cmds[0].Source }
     # RunOnce and -NoProfile shells see a thinner PATH; these carry the common installs.
     $candidates = @(
-        $env:CLAUDE_CODE_BIN,
         (Join-Path $env:USERPROFILE '.local\bin\claude.exe'),
         (Join-Path $env:LOCALAPPDATA 'Programs\claude\claude.exe'),
         (Join-Path $env:APPDATA 'npm\claude.cmd'),

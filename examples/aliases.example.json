@@ -5,12 +5,11 @@
     "blog": {
       "path": "C:\\work\\blog",
       "triggers": ["blog folder", "blog repo", "블로그 폴더"],
-      "note": "A bare mention of 'blog' usually means the live site, not this folder: ask which one before opening."
+      "note": "A bare 'blog' without the word folder or repo usually means the writing notes, not this repository: use the alias 'notes' instead."
     },
     "notes": {
-      "path": "C:\\work\\notes",
-      "triggers": ["notes", "노트 폴더"],
-      "note": "Default target when 'blog' is mentioned without the word folder or repo."
+      "path": "%USERPROFILE%\\Documents\\notes",
+      "triggers": ["notes", "노트 폴더"]
     },
     "client-x": {
       "path": "D:\\clients\\x\\app",

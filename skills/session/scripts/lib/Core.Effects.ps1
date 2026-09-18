@@ -59,7 +59,8 @@ function Invoke-SessionLaunch {
         [switch]$AllowUntrusted
     )
 
-    if (-not $AllowUntrusted -and -not (Test-WorkspaceTrusted -Path $WorkDir)) {
+    $trusted = Test-WorkspaceTrusted -Path $WorkDir
+    if (-not $trusted -and -not $AllowUntrusted) {
         return [ordered]@{
             ok = $false; code = 'UNTRUSTED_WORKSPACE'; path = $WorkDir
             trustKey = (Get-TrustKey -Path $WorkDir)
@@ -86,17 +87,19 @@ function Invoke-SessionLaunch {
     }
     Write-KitLog ("launch mode={0} source={1} launcher={2} session={3} cwd={4}" -f $Mode, $Source, $launcher, $SessionId, $WorkDir)
 
+    # <CODE>_UNTRUSTED: the tab was opened on the user's say-so (-AllowUntrusted) in a
+    # folder that really is untrusted, so it is sitting on the trust prompt.
     $code = switch ($Mode) { 'new' { 'LAUNCHED' } 'resume' { 'RESUMED' } 'picker' { 'PICKER_OPENED' } }
-    if ($AllowUntrusted) { $code += '_UNTRUSTED' }
+    if (-not $trusted) { $code += '_UNTRUSTED' }
     $message = switch ($Mode) {
         'new' { 'A new session was opened in a terminal tab.' }
         'resume' { 'The session was reopened in a terminal tab.' }
         'picker' { "No session could be chosen automatically; the CLI's own session picker was opened in that folder." }
     }
-    if ($AllowUntrusted) { $message += ' The trust prompt is showing in that tab and has to be answered there, by the user.' }
+    if (-not $trusted) { $message += ' The trust prompt is showing in that tab and has to be answered there, by the user.' }
 
     return [ordered]@{
-        ok = $true; code = $code; path = $WorkDir; alias = $(if ($Alias) { $Alias } else { $null }); mode = $Mode
+        ok = $true; code = $code; path = $WorkDir; alias = $(if ($Alias) { $Alias } else { $null }); mode = $Mode; trusted = $trusted
         sessionId = $SessionId; registered = $registered; launcher = $launcher; message = $message
     }
 }

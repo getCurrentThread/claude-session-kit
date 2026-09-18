@@ -31,7 +31,7 @@ try {
             })
     }
     try { $table = @(Get-AliasTable) } catch {
-        Exit-WithResult ([ordered]@{ ok = $false; code = 'ALIASES_UNREADABLE'; file = $file; message = "aliases.json is not valid JSON: $($_.Exception.Message)" })
+        Exit-WithResult ([ordered]@{ ok = $false; code = 'ALIASES_UNREADABLE'; file = $file; message = $_.Exception.Message })
     }
     $settings = Get-TempTaskSettings
     $rows = @($table | ForEach-Object {

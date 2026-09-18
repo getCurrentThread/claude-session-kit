@@ -17,7 +17,8 @@
   transcripts are never candidates, and `claude --continue` is never used.
 
   Prints one JSON object.
-  code: RESUMED | PICKER_OPENED | NO_RESUMABLE_SESSION | UNTRUSTED_WORKSPACE |
+  code: RESUMED | PICKER_OPENED (each with an _UNTRUSTED suffix after -AllowUntrusted, when the
+        tab is on the trust prompt) | NO_RESUMABLE_SESSION | UNTRUSTED_WORKSPACE |
         ALIAS_NOT_FOUND | PATH_NOT_FOUND | CLAUDE_NOT_FOUND
 
 .PARAMETER Fork

@@ -26,8 +26,22 @@ The standalone `reboot-continue` skill and a workspace launcher became one plugi
   RunOnce limit).
 - **Folder trust is checked** before planning a reboot or opening any session; an untrusted folder is
   refused (`UNTRUSTED_WORKSPACE`) rather than left waiting on an unseen prompt.
-- **The prompt is never logged.** The log records its length only. `-Status` no longer prints it.
+- **The prompt is never logged.** The log records only its length and a short SHA-256 prefix.
+  `-Status` no longer prints it.
+- **The prompt never passes through `cmd.exe`.** When `claude` is an npm-style `.cmd` shim, the resume
+  script hands the prompt over in `resume-prompt.txt` and the command line only points at the file —
+  `cmd.exe` would otherwise interpret `&`, `|`, `%VAR%` and quotes in it and drop everything after the
+  first line. A real `claude.exe` is preferred when both are on PATH.
+- **`reboot-commit.ps1` takes nothing executable from `plan.json`.** The RunOnce command is accepted
+  only in the exact shape `reboot-plan.ps1` renders, with an installed PowerShell/Windows Terminal,
+  and is re-rendered before it is registered; the script that gets frozen is always the one shipped
+  next to `reboot-commit.ps1`. A plan dated in the future is refused like an expired one.
+- **A session id is verified before the reboot, not after.** `reboot-plan.ps1 -SessionId` is refused
+  unless the transcript exists, is interactive and belongs to the folder; the running session is
+  taken from `CLAUDE_CODE_SESSION_ID`.
 - **A stale metadata-only transcript is never chosen** as the session to resume.
+- **A missing working directory at logon launches nothing** and keeps the state, instead of starting
+  Claude somewhere else.
 - State moved from `~\.claude\reboot-continue\` to `~\.claude\claude-session-kit\`. The RunOnce value
   name (`ClaudeRebootContinue`) is unchanged; the new resume script still reads an old `state.json`
   for one release.

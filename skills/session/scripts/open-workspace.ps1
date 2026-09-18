@@ -6,7 +6,8 @@
 .DESCRIPTION
   An alias that is not in aliases.json is an error -- no other folder is ever
   guessed. Prints one JSON object.
-  code: LAUNCHED | UNTRUSTED_WORKSPACE | ALIAS_NOT_FOUND | NO_ALIASES | PATH_NOT_FOUND | CLAUDE_NOT_FOUND
+  code: LAUNCHED | LAUNCHED_UNTRUSTED (-AllowUntrusted, the tab is on the trust prompt) |
+        UNTRUSTED_WORKSPACE | ALIAS_NOT_FOUND | NO_ALIASES | PATH_NOT_FOUND | CLAUDE_NOT_FOUND
 
 .PARAMETER AllowUntrusted
   Only after the user has been told the folder is untrusted and said to go ahead.

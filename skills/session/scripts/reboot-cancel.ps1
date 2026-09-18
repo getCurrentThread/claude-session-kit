@@ -10,7 +10,8 @@
   Also sweeps the state file of the older standalone "reboot-continue" skill, which
   used the same RunOnce value name.
 
-  Prints one JSON object. code: CANCELLED | NOTHING_PENDING | STATUS
+  Prints one JSON object. code: CANCELLED | NOTHING_PENDING | STATUS | RUNONCE_NOT_REMOVED
+  (the resume may still fire at the next logon)
 
 .PARAMETER Status
   Report only. The prompt body is never printed -- only its length.

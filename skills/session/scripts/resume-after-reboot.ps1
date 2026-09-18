@@ -14,7 +14,9 @@
 
   Reads state.json, changes to the saved folder and runs
       claude --resume <id> -- "<prompt>"
-  or, when no session id was recorded, a fresh `claude -- "<prompt>"`. It never
+  or, when no session id was recorded, a fresh `claude -- "<prompt>"`. When claude
+  is a .cmd/.bat shim, the prompt is written to <kit state>\resume-prompt.txt and
+  the command line only points at that file (cmd.exe would re-parse it). It never
   uses `claude --continue`, which reopens whatever conversation is newest in the
   folder -- possibly a scheduled run's. It never re-decides which session to
   resume either: that was settled, and shown to the user, before the reboot.
@@ -70,21 +72,39 @@ $workdir   = [string]$state.workdir
 $sessionId = [string]$state.session_id
 $prompt    = [string]$state.prompt
 
-if ($workdir -and (Test-Path -LiteralPath $workdir -PathType Container)) {
-    Set-Location -LiteralPath $workdir
-} else {
-    Write-Log "WARN: saved workdir '$workdir' not found; staying in $((Get-Location).Path)"
+# The session is resumed in the folder RECORDED for it or not at all -- the same
+# rule every other script in the kit follows. A mapped or removable drive can lag
+# behind the logon, so wait a little before giving up.
+$found = $false
+if ($workdir) {
+    foreach ($try in 1..10) {
+        if (Test-Path -LiteralPath $workdir -PathType Container) { $found = $true; break }
+        if ($DryRun) { break }
+        Start-Sleep -Seconds 3
+    }
 }
+if (-not $found) {
+    Write-Log "ERROR: saved workdir '$workdir' not found. Not launching; the state file is kept."
+    Write-Log "When the folder is back, run this script again: $PSCommandPath  (reboot-cancel.ps1 discards the pending resume instead)."
+    Wait-BeforeClose
+    exit 1
+}
+Set-Location -LiteralPath $workdir
 
 # --- resolve the claude binary -------------------------------------------------
-# -CommandType Application: under a profile, a function or alias named `claude`
-# must not win. RunOnce sees a thinner PATH than a terminal, so the list matters.
+# An explicit override wins (same order as Resolve-ClaudeBinary in lib/). Then
+# PATH, with -CommandType Application so that a profile function or alias named
+# `claude` cannot win, and a real .exe ahead of an npm-style .cmd shim. RunOnce
+# sees a thinner PATH than a terminal, so the list of usual places matters.
 $claude = $null
-$cmdInfo = Get-Command claude -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($cmdInfo) { $claude = $cmdInfo.Source }
+if ($env:CLAUDE_CODE_BIN -and (Test-Path -LiteralPath $env:CLAUDE_CODE_BIN -PathType Leaf)) { $claude = $env:CLAUDE_CODE_BIN }
+if (-not $claude) {
+    $cmds = @(Get-Command claude -CommandType Application -All -ErrorAction SilentlyContinue)
+    $exe = $cmds | Where-Object { $_.Source -match '\.exe\z' } | Select-Object -First 1
+    if ($exe) { $claude = $exe.Source } elseif ($cmds.Count -gt 0) { $claude = $cmds[0].Source }
+}
 if (-not $claude) {
     $candidates = @(
-        $env:CLAUDE_CODE_BIN,
         (Join-Path $env:USERPROFILE '.local\bin\claude.exe'),
         (Join-Path $env:LOCALAPPDATA 'Programs\claude\claude.exe'),
         (Join-Path $env:APPDATA 'npm\claude.cmd'),
@@ -100,12 +120,31 @@ if (-not $claude) {
     exit 1
 }
 
-# Windows PowerShell 5.1 does not escape embedded quotes when it builds a native
-# command line; PowerShell 7.3+ does.
+# --- how the prompt travels ------------------------------------------------------
+# To a real executable: as one argument. To a .cmd/.bat shim (an npm install):
+# NEVER -- cmd.exe re-parses the shim's command line, so quotes, & | < > and %VAR%
+# in the prompt would be live, and everything after the first line feed is dropped.
+# The prompt goes into a file instead and the command line carries a fixed
+# sentence, made of nothing cmd.exe cares about, that points at it.
+$delivery = 'argv'
 $promptArg = $prompt
-if ($PSVersionTable.PSVersion.Major -lt 7) { $promptArg = $prompt -replace '"', '\"' }
+if ($claude -match '\.(cmd|bat)\z') {
+    $delivery = 'file'
+    $promptFile = Join-Path $kitRoot 'resume-prompt.txt'
+    if ($promptFile -match '\A[A-Za-z0-9 _.:\\-]+\z') { $where = "the file $promptFile" }
+    else { $where = 'the file resume-prompt.txt in the claude-session-kit folder under .claude in your home folder' }
+    $promptArg = "The machine has been rebooted as planned. Read $where and continue from the instructions in it."
+}
 
-$uuid = '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$'
+# PowerShell 7.3+ builds a correct native command line from an argument array.
+# Windows PowerShell 5.1 and pwsh 7.0-7.2 (and 7.3+ in 'Legacy' mode) do not: they
+# neither escape embedded quotes nor wrap an argument reliably, and no amount of
+# pre-escaping fixes both (a prompt that STARTS with a quote is never wrapped). On
+# those hosts the command line is rendered here and the process started directly.
+$ownCommandLine = ($delivery -eq 'argv') -and
+    (($PSVersionTable.PSVersion -lt [version]'7.3') -or ("$PSNativeCommandArgumentPassing" -eq 'Legacy'))
+
+$uuid = '\A[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\z'
 if ($sessionId -and $sessionId -match $uuid) {
     # '--' ends option parsing. `--resume` takes an OPTIONAL value, so without the
     # separator the prompt is liable to be consumed as the resume target.
@@ -121,18 +160,39 @@ if ($sessionId -and $sessionId -match $uuid) {
 Write-Log "workdir : $((Get-Location).Path)"
 Write-Log "session : $sessionDesc"
 Write-Log "claude  : $claude"
-Write-Log "prompt  : $($prompt.Length) chars"
+Write-Log "prompt  : $($prompt.Length) chars, delivered by $delivery"
 
 if ($DryRun) {
     Write-Log 'DryRun: not launching. State file left in place.'
     exit 0
 }
 
+if ($delivery -eq 'file') {
+    [IO.File]::WriteAllText($promptFile, $prompt, (New-Object System.Text.UTF8Encoding($false)))
+}
+
 # Archive the state FIRST, so a relaunch that crashes can never loop.
 Move-Item -LiteralPath $stateFile -Destination (Join-Path (Split-Path -Parent $stateFile) 'state.last.json') -Force
 
 Start-Sleep -Seconds 3
-& $claude @claudeArgs
-$code = $LASTEXITCODE
+if ($ownCommandLine) {
+    # CommandLineToArgvW rules: backslashes before a quote double up and the quote
+    # gets one more; trailing backslashes double up before the closing quote. Every
+    # other argument here is a flag or a validated UUID and needs no quoting.
+    $quoted = $promptArg -replace '(\\*)"', '$1$1\"'
+    $quoted = '"' + ($quoted -replace '(\\+)\z', '$1$1') + '"'
+    $flags = @($claudeArgs | Select-Object -First ($claudeArgs.Count - 1))
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $claude
+    $psi.Arguments = (($flags -join ' ') + ' ' + $quoted)
+    $psi.UseShellExecute = $false          # same console, no shell in between
+    $psi.WorkingDirectory = (Get-Location).Path
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $proc.WaitForExit()
+    $code = $proc.ExitCode
+} else {
+    & $claude @claudeArgs
+    $code = $LASTEXITCODE
+}
 Write-Log "claude exited with code $code"
 Wait-BeforeClose
