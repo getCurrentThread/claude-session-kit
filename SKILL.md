@@ -1,12 +1,13 @@
 ---
 name: reboot-continue
 description: >-
-  Windows 재부팅이 필요한 작업(Windows 업데이트, 드라이버·기능 설치, WSL/Docker/Hyper-V 설치,
-  레지스트리 변경 등) 도중 재부팅 후 Claude Code 세션이 자동으로 다시 열려 이어서 진행되게 하는
-  스킬. 재부팅 전에 상태(작업 디렉토리·세션 ID·다음 단계 프롬프트)를 저장하고 RunOnce에 재개
-  스크립트를 등록한 뒤 재부팅한다. 트리거 — "재부팅하고 이어서 해", "재부팅 필요하면 알아서
-  재부팅해", "reboot and continue", 설치 프로그램·Windows 기능이 재부팅을 요구할 때, 사용자가
-  재부팅 후 자동 재개를 원할 때. 취소·상태 확인("재부팅 취소", "재개 예약 확인")도 이 스킬.
+  Carries a Claude Code session across a Windows reboot: saves state (working directory,
+  session ID, next-step prompt), registers a resume script under RunOnce, then reboots so
+  the session reopens and picks up where it left off. Use it for work that needs a restart
+  — Windows Update, driver or feature installs, WSL/Docker/Hyper-V setup, registry edits —
+  or whenever an installer demands a reboot and the user wants to resume automatically
+  (재부팅하고 이어서 해, 재부팅 필요하면 알아서 재부팅해, reboot and continue). Cancelling
+  or checking a scheduled resume (재부팅 취소, 재개 예약 확인) is this skill too.
 ---
 
 # reboot-continue
