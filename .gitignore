@@ -1,0 +1,9 @@
+# State belongs in %USERPROFILE%\.claude\claude-session-kit\, never in this tree.
+# These are a guard against a stray copy being committed.
+aliases.json
+sessions.jsonl
+state*.json
+plan.json
+next-prompt.txt
+private-tokens.txt
+*.log

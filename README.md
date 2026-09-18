@@ -1,103 +1,169 @@
-# reboot-continue
+# claude-session-kit
 
-A [Claude Code](https://claude.com/claude-code) skill for **Windows** that survives OS reboots:
-when a task requires a reboot (Windows Update, driver/feature installs, WSL/Hyper-V setup, …),
-Claude saves its state, reboots the machine, and — after you log back in — a terminal opens
-automatically with the **same session resumed and already told what to do next**.
+A [Claude Code](https://claude.com/claude-code) plugin for **Windows** with one skill that does three
+things to sessions:
 
-No more "reboot, reopen the terminal, find the session, explain where we were".
+| | You say | What happens |
+|---|---|---|
+| **Launch** | "open a new claude session", "새 임시 작업 켜줘", "`<alias>` 폴더 켜줘" | A new Windows Terminal tab opens in a fresh scratch folder or a registered workspace, running `claude`. |
+| **Resume** | "reopen my last session", "아까 그 세션 다시 켜줘" | An earlier session is reopened in a new tab, in the folder it was recorded in. |
+| **Reboot and continue** | "reboot and continue", "재부팅하고 이어서 해" | State is saved, a one-shot resume is registered, Windows restarts, and after you log in the **same session continues, already told what to do next.** |
 
-## How it works
+This repository used to be `reboot-continue`. It was renamed when the launcher was merged in; see
+[CHANGELOG.md](CHANGELOG.md) if you are coming from that skill.
 
-```
-Claude hits a step that needs a reboot
-  │
-  ├─ 1. writes a continuation prompt (what's done / what's next)
-  │       → %USERPROFILE%\.claude\reboot-continue\next-prompt.txt
-  ├─ 2. request-reboot.ps1
-  │       • saves state.json  (workdir, session id, prompt)
-  │       • registers HKCU\...\RunOnce  →  resume-after-reboot.ps1  (one-shot)
-  │       • shutdown /r /t 30
-  ▼
-Windows reboots … you log in
-  │
-  └─ RunOnce fires once → Windows Terminal opens in the saved workdir
-        → claude --resume <session-id> "<continuation prompt>"
-        → the session continues exactly where it left off
-```
+## Requirements
 
-- **Session id** is resolved automatically (explicit arg → `CLAUDE_SESSION_ID` → newest
-  transcript in `~\.claude\projects\<project>\`), with a `claude --continue` fallback.
-- **One-shot by design**: RunOnce deletes itself after firing, and the resume script archives
-  `state.json` before launching, so a failed relaunch can never loop.
-- **Semi-automatic on purpose**: you still log in yourself (no stored passwords), and
-  permission prompts in the resumed session behave as usual. Pair with
-  [Sysinternals Autologon](https://learn.microsoft.com/sysinternals/downloads/autologon)
-  if you want fully unattended reboots on a personal, BitLocker-protected machine.
+Windows 10/11 · [PowerShell 7](https://aka.ms/powershell) (`pwsh`) · Claude Code CLI ·
+Windows Terminal recommended (without it a plain console window is used).
 
 ## Install
 
-```powershell
-git clone https://github.com/getCurrentThread/reboot-continue "$env:USERPROFILE\.claude\skills\reboot-continue"
-```
-
-or with the [Skills CLI](https://skills.sh):
+As a plugin:
 
 ```
-npx skills add getCurrentThread/reboot-continue
+claude plugin marketplace add getCurrentThread/claude-session-kit
+claude plugin install claude-session-kit@claude-session-kit
 ```
 
-That's it — Claude Code picks up the skill from `~\.claude\skills\`. Next time a task needs a
-reboot, ask Claude to "재부팅하고 이어서 해" / "reboot and continue", or let it invoke the
-skill on its own when an installer demands a restart.
-
-## Manual usage
+or clone it where Claude Code auto-loads plugins (no install step; edits are live in the next session):
 
 ```powershell
-$s = "$env:USERPROFILE\.claude\skills\reboot-continue\scripts\request-reboot.ps1"
-
-# Register + reboot in 30s (state auto-detected from the current directory)
-powershell -NoProfile -ExecutionPolicy Bypass -File $s -Prompt "Reboot done. Continue." 
-
-# Register only; you reboot whenever you like
-powershell -NoProfile -ExecutionPolicy Bypass -File $s -NoReboot
-
-# Abort a pending reboot and unregister everything
-powershell -NoProfile -ExecutionPolicy Bypass -File $s -Cancel
-
-# Inspect what is currently registered
-powershell -NoProfile -ExecutionPolicy Bypass -File $s -Status
+git clone https://github.com/getCurrentThread/claude-session-kit "$env:USERPROFILE\.claude\skills\claude-session-kit"
 ```
 
-Options: `-Prompt <text>` / `-PromptFile <utf8-file>` (continuation prompt),
-`-SessionId <uuid>`, `-WorkDir <path>`, `-DelaySeconds <n>` (default 30),
-`-NoReboot`, `-Cancel`, `-Status`.
+Either way the skill is **`claude-session-kit:session`**. Plugin skills never get a bare slash alias —
+there is no `/launch` or `/reboot-continue` — but you rarely type it: the skill is triggered by what
+you ask for.
 
-Files live under `%USERPROFILE%\.claude\reboot-continue\` (`state.json`, `state.last.json`,
-`resume.log`) — the skill directory itself stays clean.
+`npx skills add` is not supported.
+
+## Aliases
+
+Workspace aliases are personal, so they live outside the plugin, in
+`%USERPROFILE%\.claude\claude-session-kit\aliases.json`. Start from
+[examples/aliases.example.json](examples/aliases.example.json):
+
+```json
+{
+  "version": 2,
+  "tempTask": { "root": "%USERPROFILE%\\Downloads", "prefix": "test" },
+  "aliases": {
+    "blog": {
+      "path": "C:\\work\\blog",
+      "triggers": ["blog folder", "블로그 폴더"],
+      "note": "A bare mention of 'blog' usually means the live site, not this folder: ask before opening."
+    }
+  }
+}
+```
+
+`triggers` are the phrases that mean this folder. `note` tells Claude what to do with an ambiguous
+mention, in your own words. `confirm: true` makes Claude ask before opening even on a match. The
+older flat form `{ "name": "path" }` still loads. Ask Claude to "add an alias" and it edits this file
+— never the skill.
+
+## How each part works
+
+**Launch.** `new-temp-task.ps1` creates `<root>\<prefix><N>` — N counts folders on disk *and* folders
+that survive only as transcript history, so a new scratch folder never inherits an old one's
+conversations. `open-workspace.ps1` opens an alias or an explicit path; an unknown alias is an error,
+never a guess. Every session is started with its own `--session-id` and recorded in `sessions.jsonl`.
+
+**Resume.** `resume-session.ps1` picks a session in this order: the **launcher registry** → a **scan of
+interactive transcripts from the last 30 days** → the **CLI's own picker** (`claude --resume`) in that
+folder. Transcripts written by scheduled or SDK runs are never candidates, and `claude --continue` is
+never used — it reopens whatever is newest in a folder, which may be an automation's conversation.
+
+**Reboot and continue** is two steps on purpose:
+
+```
+reboot-plan.ps1      resolves folder, session, prompt and the exact RunOnce command; checks everything
+  │                  that can fail while you are still watching; writes plan.json + a one-time token.
+  │                  Changes nothing else.
+  ▼
+reboot-commit.ps1 -Token <t>
+                     freezes a copy of the resume script under the state folder, writes state.json,
+                     sets HKCU\…\RunOnce, runs `shutdown /r /t 30`.
+  ▼
+(logon) RunOnce → Windows Terminal → <state>\runtime\resume.ps1
+                     → claude --resume <session-id> -- "<continuation prompt>"
+```
+
+- `reboot-commit.ps1` is the **only** file that can restart Windows or write the RunOnce value; the
+  test suite enforces that. Keep it out of your permission allowlist — its prompt is the last lock.
+- RunOnce points at a **frozen copy** of the resume script, never into the plugin: an installed plugin
+  lives in a versioned cache directory, and an update before the next logon would otherwise leave a
+  dead entry that fails silently.
+- One-shot by design: RunOnce deletes itself, and the resume script archives `state.json` before
+  launching, so a failing relaunch cannot loop.
+- You still log in yourself (no stored passwords), and permission prompts in the resumed session
+  behave as usual. Abort with `shutdown /a` or `reboot-cancel.ps1`.
+
+**Folder trust — fail closed.** Claude Code asks once per folder whether you trust it, because a
+folder's `.claude/settings.json` can run hooks and MCP servers. A tab opened by a launcher tends to sit
+on that prompt unseen, so the kit checks `~/.claude.json` **read-only** first and, for an untrusted
+folder, **refuses to start the session and says so**. You then open the folder yourself once, or tell
+Claude to go ahead (`-AllowUntrusted`), in which case the prompt appears in the new tab and you answer
+it. The kit never writes `hasTrustDialogAccepted`. Note that a git repository does not inherit trust
+from a trusted parent folder.
+
+## State
+
+Everything lives in `%USERPROFILE%\.claude\claude-session-kit\` — `aliases.json`, `sessions.jsonl`
+(registry), `plan.json` / `state.json` / `state.last.json` (reboot), `next-prompt.txt`,
+`runtime\resume.ps1` (frozen copy), `kit.log`. The continuation prompt is stored in the state files
+because the resume needs it; it is **never** written to the log or echoed by `-Status`.
+
+## Scripts
+
+All under `skills/session/scripts/`, all print one JSON object (`ok`, `code`, `message`, …):
+
+| Script | Does | Side effects |
+|---|---|---|
+| `list-aliases.ps1` | the alias table | none |
+| `list-sessions.ps1` | sessions that could be resumed | none |
+| `list-candidates.ps1` | most-used folders without an alias | none |
+| `new-temp-task.ps1` | new scratch folder + new session | folder, terminal tab |
+| `open-workspace.ps1 -Alias\|-Path` | new session in a workspace | terminal tab |
+| `resume-session.ps1 [-Alias\|-Path] [-SessionId]` | reopen a session | terminal tab |
+| `reboot-plan.ps1` | plan a reboot-and-resume | writes `plan.json` only |
+| `reboot-commit.ps1 -Token` | **register + reboot** | RunOnce, `shutdown /r` |
+| `reboot-cancel.ps1 [-Status]` | cancel / inspect | removes its own RunOnce + state |
+
+## Tests
+
+```powershell
+pwsh -NoProfile -File tests/run-tests.ps1
+```
+
+No Pester, no network. Runs in a throwaway sandbox (`CLAUDE_SESSION_KIT_HOME`, `CLAUDE_CONFIG_DIR`),
+opens no tab, schedules no reboot, and asserts the exact RunOnce string, `wt` argument list and
+`claude` argv.
 
 ## Uninstall
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\skills\reboot-continue\scripts\request-reboot.ps1" -Cancel
-Remove-Item -Recurse -Force "$env:USERPROFILE\.claude\skills\reboot-continue"
-Remove-Item -Recurse -Force "$env:USERPROFILE\.claude\reboot-continue" -ErrorAction SilentlyContinue
+pwsh -NoProfile -File "<plugin>\skills\session\scripts\reboot-cancel.ps1"   # make sure nothing is pending
+claude plugin uninstall claude-session-kit                                   # or delete the cloned folder
+Remove-Item -Recurse -Force "$env:USERPROFILE\.claude\claude-session-kit"    # aliases, registry, logs
 ```
 
 ---
 
 ## 한국어 요약
 
-재부팅이 필요한 작업에서 "재부팅 → 로그인 → 터미널 열기 → 세션 찾기 → 상황 설명"을 전부
-자동화하는 Claude Code 스킬입니다(Windows 전용). 재부팅 전에 상태와 "다음 단계" 프롬프트를
-저장하고 RunOnce에 재개 스크립트를 등록 → 로그인하면 Windows Terminal이 자동으로 열리며
-`claude --resume`으로 같은 세션이 이어집니다.
+Windows용 Claude Code 플러그인입니다. 스킬 하나(`claude-session-kit:session`)가 세 가지를 합니다.
 
-- 설치: 위 `git clone` 또는 `npx skills add getCurrentThread/reboot-continue`
-- 사용: 작업 중 "재부팅하고 이어서 해"라고 하면 Claude가 알아서 처리
-- 취소: `request-reboot.ps1 -Cancel` (예약 재부팅 중단 + 등록 해제)
-- 비밀번호를 저장하지 않는 반자동 설계입니다. 완전 무인이 필요하면 Sysinternals Autologon을
-  얹으세요(개인 PC + BitLocker 권장).
+- **새 세션 열기** — "새 임시 작업 켜줘", "`<별칭>` 폴더 켜줘". Windows Terminal 새 탭에서 `claude`를 띄웁니다.
+- **이전 세션 다시 열기** — "아까 그 세션 다시 켜줘". 런처 레지스트리 → 최근 30일 transcript 스캔 →
+  CLI 기본 피커 순으로 고릅니다. 크론·SDK 세션은 후보가 아니고 `--continue`는 쓰지 않습니다.
+- **재부팅하고 이어서** — "재부팅하고 이어서 해". 계획(`reboot-plan`)과 실행(`reboot-commit`)이 분리돼
+  있고, 재부팅할 수 있는 파일은 `reboot-commit.ps1` 하나뿐입니다. 로그인하면 같은 세션이 이어집니다.
+
+별칭은 플러그인 밖 `%USERPROFILE%\.claude\claude-session-kit\aliases.json`에 둡니다. 신뢰되지 않은
+폴더에서는 세션을 **켜지 않고 알려줍니다**(fail-closed) — `hasTrustDialogAccepted`를 대신 쓰지 않습니다.
+비밀번호를 저장하지 않는 반자동 설계라 로그인은 직접 합니다.
 
 ## License
 

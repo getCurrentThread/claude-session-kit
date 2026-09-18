@@ -1,0 +1,20 @@
+{
+  "name": "claude-session-kit",
+  "owner": {
+    "name": "getCurrentThread"
+  },
+  "metadata": {
+    "description": "Windows session tools for Claude Code: launch, resume, and reboot-and-continue.",
+    "version": "0.1.0",
+    "pluginRoot": "."
+  },
+  "plugins": [
+    {
+      "name": "claude-session-kit",
+      "source": "./",
+      "description": "Open a new Claude Code session in a workspace folder, reopen an earlier one, and carry a session across a Windows reboot.",
+      "version": "0.1.0",
+      "keywords": ["windows", "powershell", "windows-terminal", "session", "resume", "reboot"]
+    }
+  ]
+}
