@@ -376,7 +376,13 @@ try {
     if (Test-Path -LiteralPath $tokensFile) {
         Check 'no private token appears anywhere in the tracked tree' {
             $tokens = @(Get-Content -LiteralPath $tokensFile -Encoding UTF8 | Where-Object { $_.Trim() -and -not $_.StartsWith('#') } | ForEach-Object Trim)
-            $files = @(& git -C $repo ls-files --cached --others --exclude-standard) | ForEach-Object { Join-Path $repo $_ } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
+            # An installed copy (plugin cache) is not a git work tree: scan every file there.
+            $files = if (Test-Path -LiteralPath (Join-Path $repo '.git')) {
+                @(& git -C $repo ls-files --cached --others --exclude-standard) | ForEach-Object { Join-Path $repo $_ } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
+            } else {
+                @(Get-ChildItem -LiteralPath $repo -Recurse -File -Force | ForEach-Object FullName)
+            }
+            if (-not $files) { throw 'found no files to scan' }
             $leaks = foreach ($f in $files) { $t = [IO.File]::ReadAllText($f); foreach ($k in $tokens) { if ($t.IndexOf($k, [StringComparison]::OrdinalIgnoreCase) -ge 0) { "$([IO.Path]::GetFileName($f)): token #$([array]::IndexOf($tokens, $k) + 1)" } } }
             if ($leaks) { throw ($leaks -join '; ') }
             $true

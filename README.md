@@ -38,6 +38,9 @@ you ask for.
 
 `npx skills add` is not supported.
 
+If both exist, the installed plugin wins and the cloned copy under `~\.claude\skills\` is not loaded
+(`claude plugin list` says so). Working on the kit? Use the clone alone.
+
 ## Aliases
 
 Workspace aliases are personal, so they live outside the plugin, in
