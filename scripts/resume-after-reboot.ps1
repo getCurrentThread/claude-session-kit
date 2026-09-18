@@ -70,11 +70,18 @@ if (-not $claude) {
 }
 
 if ($sessionId) {
-  $claudeArgs = @('--resume', $sessionId, $prompt)
+  # '--' terminates option parsing. `--resume` takes an OPTIONAL value, so without
+  # the separator a prompt is liable to be consumed as the resume target.
+  $claudeArgs  = @('--resume', $sessionId, '--', $prompt)
   $sessionDesc = $sessionId
 } else {
-  $claudeArgs = @('--continue', $prompt)
-  $sessionDesc = '(latest session in workdir via --continue)'
+  # Deliberately NOT `--continue`. It reopens the most recent conversation in the
+  # directory, which may belong to a scheduled/SDK run; continuing that would
+  # append this work to an automation's transcript and is not undoable. Starting a
+  # fresh session carrying the same continuation prompt loses the earlier context
+  # but cannot corrupt someone else's history.
+  $claudeArgs  = @('--', $prompt)
+  $sessionDesc = '(no resumable session was identified -- starting a fresh one)'
 }
 
 Write-Log "workdir : $((Get-Location).Path)"
