@@ -288,6 +288,26 @@ try {
         (Same $r.Json.code 'CANDIDATES') -and (Same $row.sessions 3) -and (Same $row.alias 'good')
     }
 
+    Write-Host "`nLaunch environment (a stand-in wt records what the tab would get; nothing is launched)"
+    Check "launch: the tab gets none of the calling session's markers, and keeps the user's settings" {
+        $stub = New-Item -ItemType Directory -Force -Path (Join-Path $sandbox 'wtstub') | ForEach-Object FullName
+        [IO.File]::WriteAllText((Join-Path $stub 'wt.cmd'), "@set> `"%~dp0env.txt`"`r`n")
+        $probe = Join-Path $stub 'probe.ps1'
+        [IO.File]::WriteAllText($probe, @'
+param($Lib, $Wt)
+. $Lib
+function Resolve-WindowsTerminal { $Wt }
+function Show-TerminalWindow {}
+foreach ($n in @($script:InheritedSessionVariables) + 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT') { Set-Item "Env:$n" 'parent' }
+$env:CLAUDE_CODE_USE_POWERSHELL_TOOL = 'mine'
+Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'claude.exe' -ClaudeArgs @('--session-id', '11111111-1111-1111-1111-111111111111') | Out-Null
+'@)
+        & pwsh -NoProfile -ExecutionPolicy Bypass -File $probe -Lib (Join-Path $scripts 'lib\Core.Effects.ps1') -Wt (Join-Path $stub 'wt.cmd') 2>&1 | Out-Null
+        $seen = @(Get-Content -LiteralPath (Join-Path $stub 'env.txt'))
+        $leaked = @($seen | ForEach-Object { ($_ -split '=', 2)[0] } | Where-Object { $_ -in (@($script:InheritedSessionVariables) + 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT') })
+        (Same $leaked @()) -and ('CLAUDE_CODE_USE_POWERSHELL_TOOL=mine' -in $seen)
+    }
+
     Write-Host "`nReboot path (sandbox; -Simulate only)"
     $promptFile = Join-Path $sandbox 'prompt.txt'
     [IO.File]::WriteAllText($promptFile, "재부팅 후 이어서: SECRET-MARKER-123`nnext step")

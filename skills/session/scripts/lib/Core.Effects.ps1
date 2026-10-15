@@ -32,6 +32,10 @@ function Start-ClaudeTerminal {
         [Parameter(Mandatory)][string]$ClaudeExe,
         [string[]]$ClaudeArgs = @()
     )
+    # Process scope only: this script's environment is what wt and Start-Process pass on.
+    # Remove-Item, not SetEnvironmentVariable($name, $null): under pwsh 7.6 that still
+    # hands a child the name with an empty value.
+    foreach ($name in $script:InheritedSessionVariables) { Remove-Item -LiteralPath "Env:$name" -ErrorAction Ignore }
     $wt = Resolve-WindowsTerminal
     if ($wt) {
         $wtArgs = New-WtArgumentList -WorkDir $WorkDir -Exe $ClaudeExe -Arguments $ClaudeArgs -Window '0'

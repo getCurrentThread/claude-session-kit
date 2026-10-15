@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.1
+
+- **A launched session is a top-level session again.** Claude Code writes its own session's markers
+  (`CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_ENTRYPOINT`, …)
+  into the environment of every command it runs, and Windows Terminal hands the caller's environment
+  to the tab it opens. A `claude` started that way took itself for the asking session's child and
+  turned transcript saving off (`Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION
+  marker`), so nothing it did could be resumed. The launcher now drops those markers before it opens
+  the tab; user settings in the environment pass through unchanged. The reboot path was not
+  affected: RunOnce starts from a fresh logon environment.
+
 ## 0.1.0 — merged into `claude-session-kit`
 
 The standalone `reboot-continue` skill and a workspace launcher became one plugin with one skill,

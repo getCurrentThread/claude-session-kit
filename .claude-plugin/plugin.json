@@ -1,6 +1,6 @@
 {
   "name": "claude-session-kit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Windows session tools for Claude Code: open a new session in a workspace folder, reopen an earlier one, and carry a session across a reboot.",
   "author": {
     "name": "getCurrentThread"

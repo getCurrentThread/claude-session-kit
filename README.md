@@ -73,6 +73,9 @@ The older flat form `{ "name": "path" }` still loads. Ask Claude to "add an alia
 that survive only as transcript history, so a new scratch folder never inherits an old one's
 conversations. `open-workspace.ps1` opens an alias or an explicit path; an unknown alias is an error,
 never a guess. Every session is started with its own `--session-id` and recorded in `sessions.jsonl`.
+It is started as a top-level session: the asking session's markers (`CLAUDECODE`,
+`CLAUDE_CODE_CHILD_SESSION`, its session id and entrypoint, …), which Windows Terminal would otherwise
+pass to the new tab, are dropped first — a `claude` that inherits them turns transcript saving off.
 
 **Resume.** `resume-session.ps1` picks a session in this order: the **launcher registry** → a **scan of
 interactive transcripts from the last 30 days** → the **CLI's own picker** (`claude --resume`) in that
