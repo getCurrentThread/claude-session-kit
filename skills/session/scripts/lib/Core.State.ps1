@@ -35,11 +35,12 @@ function Get-KitRoot {
 }
 
 function Get-KitPath {
-    param([Parameter(Mandatory)][ValidateSet('aliases', 'registry', 'state', 'stateLast', 'plan', 'prompt', 'log', 'runtime')][string]$Name)
+    param([Parameter(Mandatory)][ValidateSet('aliases', 'registry', 'openSessions', 'state', 'stateLast', 'plan', 'prompt', 'log', 'runtime')][string]$Name)
     $root = Get-KitRoot
     switch ($Name) {
         'aliases' { Join-Path $root 'aliases.json' }
         'registry' { Join-Path $root 'sessions.jsonl' }
+        'openSessions' { Join-Path $root 'open-sessions' }
         'state' { Join-Path $root 'state.json' }
         'stateLast' { Join-Path $root 'state.last.json' }
         'plan' { Join-Path $root 'plan.json' }
@@ -436,6 +437,114 @@ function Get-RunningSessions {
         [pscustomobject]@{
             SessionId = [string]$r['sessionId']; Pid = [int]$r['pid']; Kind = [string]$r['kind']; Cwd = [string]$r['cwd']
             Name = [string]$r['name']; Status = [string]$r['status']; Source = 'pidfile'
+        }
+    }
+}
+
+# --- open sessions ------------------------------------------------------------------------------
+# <kit>\open-sessions\<sessionId>.json: one file per interactive session that started
+# and has not been ended on purpose. track-session.ps1 (a SessionStart/SessionEnd hook)
+# writes and deletes them, so a file that outlives its session is a session lost to a
+# crash, a closed window or a power cut -- what restore-open.ps1 offers to reopen. One
+# file per session rather than a shared log: sessions start and end concurrently.
+
+# Win32 argument splitting (the CommandLineToArgvW rules), enough to read flags back off
+# a process command line: a quoted prompt that merely mentions a flag stays one argument.
+function Split-CommandLine {
+    param([string]$CommandLine)
+    $out = [System.Collections.Generic.List[string]]::new()
+    $cur = [Text.StringBuilder]::new()
+    $s = [string]$CommandLine; $i = 0; $inQuote = $false; $any = $false
+    while ($i -lt $s.Length) {
+        $c = $s[$i]
+        if ($c -eq '\') {
+            $n = 0; while ($i -lt $s.Length -and $s[$i] -eq '\') { $n++; $i++ }
+            if ($i -lt $s.Length -and $s[$i] -eq '"') {
+                # 2n backslashes + quote: n backslashes, and the quote still toggles;
+                # 2n+1: n backslashes and a literal quote
+                [void]$cur.Append([char]'\', [int][math]::Floor($n / 2))
+                if ($n % 2) { [void]$cur.Append([char]'"'); $i++ }
+            } else {
+                [void]$cur.Append([char]'\', $n)
+            }
+            $any = $true; continue
+        }
+        if ($c -eq '"') {
+            if ($inQuote -and $i + 1 -lt $s.Length -and $s[$i + 1] -eq '"') { [void]$cur.Append([char]'"'); $i += 2; continue }
+            $inQuote = -not $inQuote; $any = $true; $i++; continue
+        }
+        if (-not $inQuote -and ($c -eq ' ' -or $c -eq "`t")) {
+            if ($any) { $out.Add($cur.ToString()); [void]$cur.Clear(); $any = $false }
+            $i++; continue
+        }
+        [void]$cur.Append($c); $any = $true; $i++
+    }
+    if ($any) { $out.Add($cur.ToString()) }
+    return , $out.ToArray()
+}
+
+# The permission mode a session was STARTED with, read off the claude command line:
+# the hook input does not carry one. bypassPermissions is recorded so a restore can say
+# it was dropped; what is replayed goes through Get-ClaudeArgs' allowlist regardless.
+function Get-StartPermissionMode {
+    param([string]$CommandLine)
+    $argv = Split-CommandLine $CommandLine
+    $mode = $null
+    for ($i = 1; $i -lt $argv.Count; $i++) {
+        $a = $argv[$i]
+        if ($a -ceq '--') { break }   # everything after it is the prompt
+        if ($a -ceq '--dangerously-skip-permissions') { return 'bypassPermissions' }
+        if ($a -ceq '--permission-mode' -and $i + 1 -lt $argv.Count) { $mode = $argv[++$i] }
+        elseif ($a.StartsWith('--permission-mode=', [StringComparison]::Ordinal)) { $mode = $a.Substring(18) }
+    }
+    if ($mode -and $mode -cmatch '\A[A-Za-z]{1,32}\z') { return $mode }
+    return $null
+}
+
+function Set-OpenSessionRecord {
+    param(
+        [Parameter(Mandatory)][string]$SessionId,
+        [string]$Cwd,
+        [string]$TranscriptPath,
+        [string]$PermissionMode,
+        [string]$Source
+    )
+    # The id becomes a file name: nothing else may.
+    if (-not (Test-SessionIdFormat $SessionId)) { throw "Not a session id: $SessionId" }
+    # No shell is recorded: a restored session opens in a new tab running claude
+    # directly, never through a shell, where its paths and free text would be re-parsed.
+    $record = [ordered]@{
+        sessionId      = $SessionId
+        cwd            = $Cwd
+        transcriptPath = $TranscriptPath
+        startedAt      = (Get-Date).ToString('o')
+        permissionMode = $(if ($PermissionMode) { $PermissionMode } else { $null })
+        source         = $Source
+    } | ConvertTo-Json -Compress
+    $dir = Get-KitPath openSessions
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    $file = Join-Path $dir ($SessionId + '.json')
+    # Written aside and moved into place, so a reader never sees half a record.
+    [IO.File]::WriteAllText($file + '.tmp', $record, [Text.UTF8Encoding]::new($false))
+    [IO.File]::Move($file + '.tmp', $file, $true)
+}
+
+function Remove-OpenSessionRecord {
+    param([Parameter(Mandatory)][string]$SessionId)
+    if (-not (Test-SessionIdFormat $SessionId)) { throw "Not a session id: $SessionId" }
+    [IO.File]::Delete((Join-Path (Get-KitPath openSessions) ($SessionId + '.json')))   # absent is fine
+}
+
+# Rows: SessionId, Cwd, TranscriptPath, PermissionMode, Source.
+function Get-OpenSessionRecords {
+    foreach ($f in @(Get-ChildItem -LiteralPath (Get-KitPath openSessions) -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
+        if (-not (Test-SessionIdFormat $f.BaseName)) { continue }
+        try { $r = Get-Content -LiteralPath $f.FullName -Raw -Encoding UTF8 | ConvertFrom-Json -AsHashtable } catch { continue }
+        # The file name is the session id; a record that says otherwise is not believed.
+        if ($r -isnot [System.Collections.IDictionary] -or [string]$r['sessionId'] -ne $f.BaseName) { continue }
+        [pscustomobject]@{
+            SessionId = $f.BaseName; Cwd = [string]$r['cwd']; TranscriptPath = [string]$r['transcriptPath']
+            PermissionMode = [string]$r['permissionMode']; Source = [string]$r['source']
         }
     }
 }

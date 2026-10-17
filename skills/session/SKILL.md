@@ -1,7 +1,7 @@
 ---
 name: session
 description: >-
-  Windows session tools for Claude Code, three jobs in one skill. (1) LAUNCH: open a NEW
+  Windows session tools for Claude Code, four jobs in one skill. (1) LAUNCH: open a NEW
   Claude Code session in a Windows Terminal tab — a fresh scratch folder or a registered
   workspace alias — only when the user gives an explicit launch verb together with
   "Claude"/"session" or a workspace (클로드 켜줘, 새 임시 작업 켜줘, 세션 열어줘, <별칭> 폴더
@@ -11,7 +11,9 @@ description: >-
   a one-shot resume, restart, and pick up after logon — for work that needs a restart
   (Windows Update, driver or feature installs, WSL/Docker/Hyper-V, registry edits) when the
   user asks to reboot and continue (재부팅하고 이어서 해, reboot and continue); cancelling or
-  checking a scheduled resume (재부팅 취소, 재개 예약 확인) is this skill too. Never fire on a
+  checking a scheduled resume (재부팅 취소, 재개 예약 확인) is this skill too. (4) RESTORE:
+  reopen the sessions that were open before a crash or a closed window (아까 열려 있던 세션들
+  다시 켜줘, 크래시 전 세션 복구, reopen the sessions I had open). Never fire on a
   bare mention of a project, product or folder name without a launch verb, and never treat
   "restart the session" as a request to restart the computer.
 ---
@@ -171,6 +173,8 @@ Safety rules:
   picks in that tab.
 - `NO_RESUMABLE_SESSION` — there is nothing to reopen. Ask whether to start a new one (§1); do not
   silently switch to a new session.
+- `ALREADY_RUNNING` — that session is open in another terminal tab right now, so nothing was opened.
+  Tell the user to switch to that tab; offer `-Fork` only if they want a copy to work on.
 
 ## 3. Reboot — restart the computer and continue this session
 
@@ -260,6 +264,44 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/reboo
 This script **cannot start** a restart. For a "cancel" or "check" request, never run the §3 scripts.
 On `NOTHING_PENDING`, say exactly that: nothing was scheduled. On `RUNONCE_NOT_REMOVED`, the resume
 may still fire at the next logon — tell the user.
+
+## 5. Restore — reopen sessions that were open before a crash or a closed window
+
+This plugin's hook records every interactive session when it starts, and deletes the record when
+the session is ended on purpose (`/exit`, Ctrl+C/Ctrl+D, `/clear`, switching with `/resume`,
+logout). Sessions lost to a crash, a closed window or a power cut keep their record, and those are
+what this branch reopens. It is not §2: §2 reopens one earlier session, while this branch brings back
+the set that was open. Same Gate 1 as §1 (an open verb), with "what was open" as the object.
+
+1. **List first (read-only):**
+   ```
+   pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/restore-open.ps1"
+   ```
+   `OPEN_SESSIONS` gives numbered rows (`n`, `title`, `cwd`, `cwdExists`, `lastWrite`,
+   `permissionMode`), newest first. Sessions that are open right now never appear. On
+   `NOTHING_TO_RESTORE`, tell the user there is nothing to bring back, and do not switch to §2 on your own.
+2. **Confirm before opening more than one tab.** Show the list and ask: all of them, or which numbers?
+   One row that the user has already named can be opened without asking again.
+3. **Reopen:**
+   ```
+   pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/restore-open.ps1" -All
+   pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/restore-open.ps1" -Ids 1,3
+   ```
+   The numbers are only valid against the list you just showed. `NOT_IN_LIST` means list again. Each
+   tab resumes its own session in the folder recorded for it, with the permission mode that session
+   was started with (`permissionMode`). `bypassPermissions` is never replayed. When a result carries
+   `droppedPermissionMode`, tell the user that session now runs with normal permission prompts.
+4. **Relay `results`, one line per session.** `RESUMED` means it is open again (`RESUMED_UNTRUSTED`
+   means it is open but waiting on the trust prompt in that tab). `UNTRUSTED_WORKSPACE` and
+   `PATH_NOT_FOUND` mean the same as in §1, and nothing was opened for that session. `ALREADY_RUNNING`
+   means it is already open in another tab. The top-level `RESTORED` means at least one session
+   opened; `NOT_RESTORED` means none did. Open an untrusted one only when the user explicitly says
+   so: `-Ids <n> -AllowUntrusted`.
+5. **Forget** — when the user does not want some of them back, this opens nothing (`FORGOTTEN`):
+   ```
+   pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/restore-open.ps1" -Forget 2,4
+   pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/restore-open.ps1" -ForgetAll
+   ```
 
 ## Adding or changing an alias
 
