@@ -9,6 +9,10 @@
   code: LAUNCHED | LAUNCHED_UNTRUSTED (-AllowUntrusted, the tab is on the trust prompt) |
         UNTRUSTED_WORKSPACE | ALIAS_NOT_FOUND | NO_ALIASES | PATH_NOT_FOUND | CLAUDE_NOT_FOUND
 
+.PARAMETER Name
+  A display name for the session (`claude --name`): the tab title, the CLI's /resume
+  picker and list-sessions.ps1 all show it. Only when the user named the session.
+
 .PARAMETER AllowUntrusted
   Only after the user has been told the folder is untrusted and said to go ahead.
 #>
@@ -16,6 +20,7 @@
 param(
     [Parameter(ParameterSetName = 'Alias', Mandatory)][string]$Alias,
     [Parameter(ParameterSetName = 'Path', Mandatory)][string]$Path,
+    [string]$Name,
     [switch]$AllowUntrusted
 )
 
@@ -44,7 +49,7 @@ try {
         Exit-WithResult ([ordered]@{ ok = $false; code = 'PATH_NOT_FOUND'; path = $Path; alias = $aliasName; message = 'That folder does not exist. Nothing was opened.' })
     }
 
-    Exit-WithResult (Invoke-SessionLaunch -WorkDir $workDir -Mode new -Alias $aliasName -Source open -AllowUntrusted:$AllowUntrusted)
+    Exit-WithResult (Invoke-SessionLaunch -WorkDir $workDir -Mode new -Alias $aliasName -Source open -Name $Name -AllowUntrusted:$AllowUntrusted)
 } catch {
     Write-KitResult -Ok $false -Code 'INTERNAL_ERROR' -Message $_.Exception.Message
     exit 2

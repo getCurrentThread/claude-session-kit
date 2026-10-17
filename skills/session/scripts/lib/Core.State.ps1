@@ -35,7 +35,7 @@ function Get-KitRoot {
 }
 
 function Get-KitPath {
-    param([Parameter(Mandatory)][ValidateSet('aliases', 'registry', 'openSessions', 'state', 'stateLast', 'plan', 'prompt', 'log', 'runtime')][string]$Name)
+    param([Parameter(Mandatory)][ValidateSet('aliases', 'registry', 'openSessions', 'state', 'stateLast', 'plan', 'prompt', 'log', 'runtime', 'archive')][string]$Name)
     $root = Get-KitRoot
     switch ($Name) {
         'aliases' { Join-Path $root 'aliases.json' }
@@ -47,6 +47,7 @@ function Get-KitPath {
         'prompt' { Join-Path $root 'next-prompt.txt' }
         'log' { Join-Path $root 'kit.log' }
         'runtime' { Join-Path $root 'runtime' }
+        'archive' { Join-Path $root 'archive' }
     }
 }
 
@@ -276,7 +277,8 @@ function Register-LaunchedSession {
         [Parameter(Mandatory)][string]$SessionId,
         [Parameter(Mandatory)][string]$Cwd,
         [string]$Alias,
-        [ValidateSet('new', 'open', 'resume')][string]$Source = 'open'
+        [ValidateSet('new', 'open', 'resume')][string]$Source = 'open',
+        [string]$Name
     )
     $record = [ordered]@{
         sessionId = $SessionId
@@ -284,6 +286,7 @@ function Register-LaunchedSession {
         alias     = $(if ($Alias) { $Alias } else { $null })
         source    = $Source
         startedAt = (Get-Date).ToString('o')
+        name      = $(if ($Name) { $Name } else { $null })
     } | ConvertTo-Json -Compress
 
     $file = Get-KitPath registry
@@ -315,6 +318,8 @@ function Get-RegisteredSessions {
             $out.Add([pscustomobject]@{
                     SessionId = [string]$r.sessionId; Cwd = [string]$r.cwd; Alias = [string]$r.alias
                     Source = [string]$r.source; StartedAt = $started
+                    # rows written before names existed have no such member, and strict mode throws on one
+                    Name = $(if ($r.PSObject.Properties['name']) { [string]$r.name } else { '' })
                 })
         } catch { continue }
     }
@@ -322,23 +327,35 @@ function Get-RegisteredSessions {
 }
 
 # --- transcripts ---------------------------------------------------------------------------
+# Reads the first -HeadLines lines and the last -TailBytes bytes, never the middle:
+# transcripts of 10+ MB are common. The CLI appends its custom-title / ai-title
+# records again as a session goes on -- across 152 real transcripts the last one
+# always ended within 40 KB of the end of the file -- so the tail holds the latest.
 function Get-ClaudeSessionRecord {
-    param([Parameter(Mandatory)][string]$TranscriptPath, [int]$HeadLines = 120)
+    param([Parameter(Mandatory)][string]$TranscriptPath, [int]$HeadLines = 120, [int]$TailBytes = 64KB)
 
     $lines = [System.Collections.Generic.List[string]]::new()
+    $tail = @()
     try {
         $fs = [IO.File]::Open($TranscriptPath, 'Open', 'Read', 'ReadWrite, Delete')   # a live session holds it open
         try {
             $reader = [IO.StreamReader]::new($fs, [Text.Encoding]::UTF8)
             while ($lines.Count -lt $HeadLines -and -not $reader.EndOfStream) { $lines.Add($reader.ReadLine()) }
+            if (-not $reader.EndOfStream) {
+                $start = [Math]::Max(0, $fs.Length - $TailBytes)
+                $fs.Position = $start
+                $tail = @([IO.StreamReader]::new($fs, [Text.Encoding]::UTF8).ReadToEnd() -split "`r?`n")
+                # the window starts mid-line unless it starts at the top
+                if ($start -gt 0) { $tail = @($tail | Select-Object -Skip 1) }
+            }
         } finally { $fs.Dispose() }
     } catch {
         return [pscustomobject]@{
-            SessionId = $null; Kind = 'unreadable'; Cwd = $null; Title = $null
+            SessionId = $null; Kind = 'unreadable'; Cwd = $null; Title = $null; TitleSource = $null
             LastWrite = [datetime]::MinValue; TranscriptPath = $TranscriptPath
         }
     }
-    $info = Get-TranscriptHeadInfo -Lines $lines.ToArray()
+    $info = Get-TranscriptHeadInfo -Lines $lines.ToArray() -TailLines $tail
     $file = Get-Item -LiteralPath $TranscriptPath
     return [pscustomobject]@{
         # The file name IS the session id; the sessionId fields inside agree with it.
@@ -346,9 +363,45 @@ function Get-ClaudeSessionRecord {
         Kind           = $info.Kind
         Cwd            = $info.Cwd
         Title          = $info.Title
+        TitleSource    = $info.TitleSource   # custom | ai | prompt | $null
         LastWrite      = $file.LastWriteTime
         TranscriptPath = $file.FullName
     }
+}
+
+# Which -Terms occur in the words of a transcript (Get-MessageText, case-insensitive),
+# plus one line around the first hit. Only lines holding a term somewhere are parsed.
+# shortcut: matching is OrdinalIgnoreCase; a few exotic letters (Turkish dotted and
+# dotless i, decomposed accents) fold differently in rg/Select-String, so a session
+# hinging on one of them can differ between the two prefilters. Fine for prose search.
+function Search-TranscriptMessages {
+    param([Parameter(Mandatory)][string]$TranscriptPath, [Parameter(Mandatory)][string[]]$Terms, [int]$SnippetLength = 120)
+    $ic = [StringComparison]::OrdinalIgnoreCase
+    # On disk a term's quotes and backslashes are JSON-escaped.
+    $escaped = @($Terms | ForEach-Object { $_.Replace('\', '\\').Replace('"', '\"') })
+    $found = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $snippet = $null
+    try {
+        $fs = [IO.File]::Open($TranscriptPath, 'Open', 'Read', 'ReadWrite, Delete')
+        try {
+            $reader = [IO.StreamReader]::new($fs, [Text.Encoding]::UTF8)
+            while ($found.Count -lt $Terms.Count -and $null -ne ($line = $reader.ReadLine())) {
+                $hit = $false
+                for ($i = 0; $i -lt $Terms.Count -and -not $hit; $i++) {
+                    $hit = -not $found.Contains($Terms[$i]) -and $line.IndexOf($escaped[$i], $ic) -ge 0
+                }
+                if (-not $hit) { continue }
+                $text = Get-MessageText -Line $line
+                if (-not $text) { continue }
+                foreach ($t in $Terms) {
+                    if ($found.Contains($t) -or $text.IndexOf($t, $ic) -lt 0) { continue }
+                    [void]$found.Add($t)
+                    if (-not $snippet) { $snippet = ConvertTo-OneLine -Text $text -Max $SnippetLength -Term $t }
+                }
+            }
+        } finally { $fs.Dispose() }
+    } catch {}
+    return [pscustomobject]@{ Found = @($found); Snippet = $snippet }
 }
 
 # Lists transcripts, newest first. NOT recursive, and that is load-bearing: project
@@ -385,6 +438,21 @@ function Get-ClaudeSessions {
         }
     }
     return ($out.ToArray() | Sort-Object LastWrite -Descending)
+}
+
+# --- transcript retention (READ ONLY) ---------------------------------------------------------
+# Claude Code deletes transcripts older than cleanupPeriodDays (default 30) from its
+# user settings.json. This only reports the number. Nothing in this kit writes that
+# file: it holds the person's permissions, hooks and environment.
+function Get-TranscriptRetention {
+    $settingsFile = Join-Path (Get-ClaudeHome) 'settings.json'
+    try {
+        $settings = Get-Content -LiteralPath $settingsFile -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -AsHashtable
+        $days = if ($settings -is [System.Collections.IDictionary]) { $settings['cleanupPeriodDays'] } else { $null }
+        # 0 or less is no retention period (the CLI rejects it since v2.1.89): report the default
+        if (($days -is [int] -or $days -is [long]) -and $days -gt 0) { return [pscustomobject]@{ Days = [long]$days; Source = 'settings' } }
+    } catch {}
+    return [pscustomobject]@{ Days = 30; Source = 'default' }
 }
 
 # --- running sessions (READ ONLY) ------------------------------------------------------------

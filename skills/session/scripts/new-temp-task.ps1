@@ -14,11 +14,16 @@
   Prints one JSON object. code: LAUNCHED | LAUNCHED_UNTRUSTED (-AllowUntrusted, the tab is on the
   trust prompt) | UNTRUSTED_WORKSPACE | PATH_NOT_FOUND | CLAUDE_NOT_FOUND
 
+.PARAMETER Name
+  A display name for the session (`claude --name`): the tab title, the CLI's /resume
+  picker and list-sessions.ps1 all show it. Only when the user named the session.
+
 .PARAMETER AllowUntrusted
   Only after the user has been told the folder is untrusted and said to go ahead.
 #>
 [CmdletBinding()]
 param(
+    [string]$Name,
     [switch]$AllowUntrusted
 )
 
@@ -60,7 +65,7 @@ try {
     }
     if (-not $newDir) { throw "Could not create a scratch folder under $root." }
 
-    Exit-WithResult (Invoke-SessionLaunch -WorkDir $newDir -Mode new -Source new -AllowUntrusted:$AllowUntrusted)
+    Exit-WithResult (Invoke-SessionLaunch -WorkDir $newDir -Mode new -Source new -Name $Name -AllowUntrusted:$AllowUntrusted)
 } catch {
     Write-KitResult -Ok $false -Code 'INTERNAL_ERROR' -Message $_.Exception.Message
     exit 2

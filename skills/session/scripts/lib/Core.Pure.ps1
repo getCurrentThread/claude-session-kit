@@ -62,10 +62,16 @@ function Test-PathEqual {
 # This is an allowlist: any entrypoint other than "cli" is automation, including
 # values that do not exist yet, and a transcript that records none is not
 # assumed safe.
+#
+# The title is the LAST custom-title (/rename, `claude --name`), else the last
+# ai-title, else the first prompt the person typed. Title records are read from the
+# head AND from -TailLines, the end of the file: the CLI appends them again as the
+# session goes on, so a /rename made hours in is found there. Classification reads
+# the head only.
 function Get-TranscriptHeadInfo {
-    param([string[]]$Lines)
+    param([string[]]$Lines, [string[]]$TailLines = @())
 
-    $entrypoint = $null; $cwd = $null; $sessionId = $null; $title = $null
+    $entrypoint = $null; $cwd = $null; $sessionId = $null; $prompt = $null
     foreach ($line in @($Lines)) {
         if (-not $line) { continue }
         if (-not $entrypoint -and $line -match '"entrypoint"\s*:\s*"([^"]+)"') { $entrypoint = $Matches[1] }
@@ -74,12 +80,29 @@ function Get-TranscriptHeadInfo {
             try { $cwd = ('"' + $raw + '"') | ConvertFrom-Json } catch { $cwd = $raw -replace '\\\\', '\' }
         }
         if (-not $sessionId -and $line -match '"sessionId"\s*:\s*"([^"]+)"') { $sessionId = $Matches[1] }
-        if ($line -match '"type"\s*:\s*"(?:ai-title|custom-title)"' -and
-            $line -match '"(?:aiTitle|customTitle)"\s*:\s*"((?:[^"\\]|\\.)*)"') {
-            # later titles supersede earlier ones
-            try { $title = ('"' + $Matches[1] + '"') | ConvertFrom-Json } catch { $title = $Matches[1] }
+        if (-not $prompt -and $line -match '"type"\s*:\s*"user"') {
+            $text = Get-MessageText -Line $line -Roles user
+            # '<' opens the CLI's own wrappers (<command-name>, ...) and this its Esc marker: neither is a prompt
+            if ($text -and -not $text.TrimStart().StartsWith('<') -and -not $text.StartsWith('[Request interrupted by user')) {
+                $prompt = ConvertTo-OneLine -Text $text -Max 80
+            }
         }
     }
+
+    $custom = $null; $ai = $null
+    foreach ($line in @($Lines) + @($TailLines)) {
+        if (-not $line -or $line -notmatch '"type"\s*:\s*"(?:ai|custom)-title"') { continue }
+        try { $r = $line | ConvertFrom-Json -AsHashtable } catch { continue }   # cut off at the tail window's edge
+        if ($r -isnot [System.Collections.IDictionary]) { continue }
+        # later records supersede earlier ones
+        if ($r['type'] -eq 'custom-title') { $custom = [string]$r['customTitle'] }
+        elseif ($r['type'] -eq 'ai-title') { $ai = [string]$r['aiTitle'] }
+    }
+    $title, $titleSource =
+        if ($custom) { $custom, 'custom' }
+        elseif ($ai) { $ai, 'ai' }
+        elseif ($prompt) { $prompt, 'prompt' }
+        else { $null, $null }
 
     $kind =
         if ($entrypoint -eq 'cli') { 'interactive' }
@@ -91,8 +114,49 @@ function Get-TranscriptHeadInfo {
         else { 'unknown' }
 
     return [pscustomobject]@{
-        Kind = $kind; Entrypoint = $entrypoint; Cwd = $cwd; SessionId = $sessionId; Title = $title
+        Kind = $kind; Entrypoint = $entrypoint; Cwd = $cwd; SessionId = $sessionId; Title = $title; TitleSource = $titleSource
     }
+}
+
+# The words of a conversation: what the person typed and what the assistant wrote
+# back. Tool calls, tool output, thinking and injected meta messages are not words,
+# nor is what the CLI itself files as "user": compaction summaries, task
+# notifications (promptSource "system") and shell or slash-command output.
+function Get-MessageText {
+    param([string]$Line, [string[]]$Roles = @('user', 'assistant'))
+    if (-not $Line) { return $null }
+    try { $r = $Line | ConvertFrom-Json -AsHashtable } catch { return $null }
+    if ($r -isnot [System.Collections.IDictionary] -or $r['type'] -notin $Roles -or $r['isMeta'] -eq $true -or
+        $r['isCompactSummary'] -eq $true -or $r['promptSource'] -eq 'system') { return $null }
+    $m = $r['message']
+    if ($m -isnot [System.Collections.IDictionary]) { return $null }
+    $content = $m['content']
+    $text = if ($content -is [string]) { $content } else {
+        @(foreach ($b in @($content)) {
+                if ($b -is [System.Collections.IDictionary] -and $b['type'] -eq 'text' -and $b['text']) { [string]$b['text'] }
+            }) -join "`n"
+    }
+    if (-not $text -or ($r['type'] -eq 'user' -and $text -match '\A\s*<(bash-std|local-command-std|task-notification)')) { return $null }
+    return $text
+}
+
+# One line of at most -Max characters: whitespace runs become one space, and a cut
+# is marked with '...'. With -Term the window keeps that term's first occurrence.
+function ConvertTo-OneLine {
+    param([AllowEmptyString()][string]$Text, [int]$Max = 80, [string]$Term)
+    $flat = ($Text -replace '\s+', ' ').Trim()
+    if ($flat.Length -le $Max) { return $flat }
+    $at = if ($Term) { $flat.IndexOf($Term, [StringComparison]::OrdinalIgnoreCase) } else { -1 }
+    $start = [Math]::Max(0, $at - 40)
+    $lead = if ($start -gt 0) { '...' } else { '' }
+    $len = $Max - $lead.Length
+    $trail = ''
+    if ($start + $len -lt $flat.Length) { $len -= 3; $trail = '...' }
+    else { $len = $flat.Length - $start }
+    # never split a surrogate pair: half an emoji is not valid UTF-8
+    if ($start -gt 0 -and [char]::IsLowSurrogate($flat[$start])) { $start++; $len-- }
+    if ($len -gt 0 -and [char]::IsHighSurrogate($flat[$start + $len - 1])) { $len-- }
+    return ($lead + $flat.Substring($start, $len) + $trail)
 }
 
 # --- claude argv -----------------------------------------------------------------

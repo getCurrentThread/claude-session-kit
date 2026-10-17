@@ -102,7 +102,7 @@ function Invoke-SessionLaunch {
     # neither can be recorded truthfully, so neither is.
     $registered = $false
     if ($SessionId -and -not $Fork -and $Mode -ne 'picker') {
-        try { Register-LaunchedSession -SessionId $SessionId -Cwd $WorkDir -Alias $Alias -Source $Source; $registered = $true } catch {}
+        try { Register-LaunchedSession -SessionId $SessionId -Cwd $WorkDir -Alias $Alias -Source $Source -Name $Name; $registered = $true } catch {}
     }
     Write-KitLog ("launch mode={0} source={1} launcher={2} session={3} cwd={4}" -f $Mode, $Source, $launcher, $SessionId, $WorkDir)
 

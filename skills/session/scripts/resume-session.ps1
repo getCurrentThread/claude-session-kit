@@ -66,7 +66,7 @@ try {
 
     $target = Resolve-ResumeTarget -Path $scope -SessionId $SessionId -Days $Days -AllowPicker:(-not $NoPicker)
     if ($target.Mode -eq 'none') {
-        Exit-WithResult ([ordered]@{ ok = $false; code = 'NO_RESUMABLE_SESSION'; path = $scope; alias = $aliasName; message = $target.Reason })
+        Exit-WithResult ([ordered]@{ ok = $false; code = 'NO_RESUMABLE_SESSION'; path = $scope; alias = $aliasName; retentionDays = (Get-TranscriptRetention).Days; message = $target.Reason })
     }
 
     $workDir = Resolve-WorkspacePath $target.Cwd
