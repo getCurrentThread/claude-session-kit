@@ -14,6 +14,10 @@
   Only interactive CLI sessions are recorded. Scheduled, SDK (-p) and background
   sessions never are.
 
+  SessionEnd runs within Claude Code's 1.5 s budget for plugin hooks, which a plugin
+  cannot raise. A pwsh too slow to start in time leaves the record, and the session
+  is offered by restore-open.ps1 until it is forgotten there.
+
   The one script here that prints NOTHING: it runs inside somebody's session, and
   SessionStart stdout is added to the model's context. It always exits 0, and an error
   goes to kit.log, never to the session.
@@ -55,7 +59,8 @@ try {
                 $kind = $null
                 try { $kind = [string](Get-Content -LiteralPath $pidFile -Raw -Encoding UTF8 | ConvertFrom-Json -AsHashtable)['kind'] } catch {}
                 if ($kind -and $kind -cne 'interactive') { exit 0 }
-                $proc = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$claudePid" -Property CommandLine -ErrorAction SilentlyContinue
+                # An async hook has no timeout of its own: a stuck WMI must not leave this running.
+                $proc = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$claudePid" -Property CommandLine -OperationTimeoutSec 5 -ErrorAction SilentlyContinue
                 if ($proc) { $mode = Get-StartPermissionMode $proc.CommandLine }
             }
             Set-OpenSessionRecord -SessionId $id -Cwd ([string]$hook['cwd']) -TranscriptPath ([string]$hook['transcript_path']) -PermissionMode $mode -Source ([string]$hook['source'])

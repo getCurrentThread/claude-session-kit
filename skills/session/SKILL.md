@@ -173,8 +173,9 @@ Safety rules:
   picks in that tab.
 - `NO_RESUMABLE_SESSION` — there is nothing to reopen. Ask whether to start a new one (§1); do not
   silently switch to a new session.
-- `ALREADY_RUNNING` — that session is open in another terminal tab right now, so nothing was opened.
-  Tell the user to switch to that tab; offer `-Fork` only if they want a copy to work on.
+- `ALREADY_RUNNING` — that session is open right now (`list-sessions.ps1` marks it `running: true`),
+  so nothing was opened. If its `sessionId` is this very session, say so and show the list instead;
+  otherwise tell the user to switch to that tab, and offer `-Fork` only if they want a copy.
 
 ## 3. Reboot — restart the computer and continue this session
 
@@ -285,9 +286,10 @@ the set that was open. Same Gate 1 as §1 (an open verb), with "what was open" a
 3. **Reopen:**
    ```
    pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/restore-open.ps1" -All
-   pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/restore-open.ps1" -Ids 1,3
+   pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/restore-open.ps1" -Ids <sessionId>,<sessionId>
    ```
-   The numbers are only valid against the list you just showed. `NOT_IN_LIST` means list again. Each
+   Pass the `sessionId` values of the rows the user chose. Row numbers (`-Ids 1,3`) work too, but
+   they shift whenever a session closes or reopens. `NOT_IN_LIST` means list again. Each
    tab resumes its own session in the folder recorded for it, with the permission mode that session
    was started with (`permissionMode`). `bypassPermissions` is never replayed. When a result carries
    `droppedPermissionMode`, tell the user that session now runs with normal permission prompts.
@@ -296,10 +298,10 @@ the set that was open. Same Gate 1 as §1 (an open verb), with "what was open" a
    `PATH_NOT_FOUND` mean the same as in §1, and nothing was opened for that session. `ALREADY_RUNNING`
    means it is already open in another tab. The top-level `RESTORED` means at least one session
    opened; `NOT_RESTORED` means none did. Open an untrusted one only when the user explicitly says
-   so: `-Ids <n> -AllowUntrusted`.
+   so: `-Ids <sessionId> -AllowUntrusted`.
 5. **Forget** — when the user does not want some of them back, this opens nothing (`FORGOTTEN`):
    ```
-   pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/restore-open.ps1" -Forget 2,4
+   pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/restore-open.ps1" -Forget <sessionId>,<sessionId>
    pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/restore-open.ps1" -ForgetAll
    ```
 

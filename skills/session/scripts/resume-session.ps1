@@ -16,9 +16,9 @@
   The tab always opens in the folder RECORDED for the session. Scheduled and SDK
   transcripts are never candidates, and `claude --continue` is never used.
 
-  When the plugin's hook recorded the permission mode the session was started with,
-  that mode is replayed (`permissionMode`); bypassPermissions never is
-  (`droppedPermissionMode`).
+  While the plugin's hook still holds a record for the session (one that was not
+  ended on purpose), the permission mode it was started with is replayed
+  (`permissionMode`); bypassPermissions never is (`droppedPermissionMode`).
 
   Prints one JSON object.
   code: RESUMED | PICKER_OPENED (each with an _UNTRUSTED suffix after -AllowUntrusted, when the

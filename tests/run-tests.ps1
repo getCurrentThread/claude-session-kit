@@ -469,19 +469,21 @@ $splat = $ArgsJson | ConvertFrom-Json -AsHashtable
         (Same $r.Json.sessions[1].cwdExists $true) -and (Same $r.Json.pruned 2) -and
         (Test-Path (Get-OpenRecordFile $liveId)) -and -not (Test-Path (Get-OpenRecordFile $vanished)) -and -not (Test-Path (Get-OpenRecordFile $autoId))
     }
-    Check 'restore-open: -Forget drops a record and opens nothing; a number not in the list or two actions are refused' {
+    Check 'restore-open: -Forget takes "3,<id>" as pwsh -File hands it over and opens nothing; a row not in the list or two actions are refused' {
         $extra = Add-OpenSession $restoreDir 'cli' (Get-Date).AddMinutes(-30) 'forget me'
-        $bad = Invoke-Restore @('-Forget', '9')
+        $extra2 = Add-OpenSession $restoreDir 'cli' (Get-Date).AddMinutes(-40) 'forget me too'
+        $bad = Invoke-Restore @('-Forget', '3,9')
         $both = Invoke-Restore @('-All', '-Forget', '3')
-        $kept = Test-Path (Get-OpenRecordFile $extra)
-        $f = Invoke-Restore @('-Forget', '3')
-        (Same $bad.Json.code 'NOT_IN_LIST') -and (Same $both.Json.code 'CONFLICTING_OPTIONS') -and $kept -and
-        (Same $f.Json.code 'FORGOTTEN') -and (Same @($f.Json.forgotten.sessionId) @($extra)) -and -not (Test-Path (Get-OpenRecordFile $extra)) -and
+        $kept = (Test-Path (Get-OpenRecordFile $extra)) -and (Test-Path (Get-OpenRecordFile $extra2))
+        $f = Invoke-Restore @('-Forget', "3,$extra2")
+        (Same $bad.Json.code 'NOT_IN_LIST') -and (Same @($bad.Json.notInList) @('9')) -and (Same $both.Json.code 'CONFLICTING_OPTIONS') -and $kept -and
+        (Same $f.Json.code 'FORGOTTEN') -and (Same @($f.Json.forgotten.sessionId) @($extra, $extra2)) -and
+        -not (Test-Path (Get-OpenRecordFile $extra)) -and -not (Test-Path (Get-OpenRecordFile $extra2)) -and
         (Test-Path (Get-OpenRecordFile $lostA)) -and (Test-Path (Get-OpenRecordFile $lostB))
     }
     Check 'restore-open -Ids: each tab resumes in its recorded folder with its start mode; untrusted is refused; bypass is never replayed' {
-        $r = Invoke-Stubbed 'restore-open.ps1' '{"Ids":[1,2]}'
-        $u = Invoke-Stubbed 'restore-open.ps1' '{"Ids":[1],"AllowUntrusted":true}'
+        $r = Invoke-Stubbed 'restore-open.ps1' '{"Ids":"1,2"}'   # one string, the way pwsh -File delivers it
+        $u = Invoke-Stubbed 'restore-open.ps1' "{`"Ids`":[`"$lostB`"],`"AllowUntrusted`":true}"
         (Same $r.Json.code 'RESTORED') -and (Same $r.Json.opened 1) -and
         (Same @($r.Json.results.code) @('UNTRUSTED_WORKSPACE', 'RESUMED')) -and (Same $r.Json.results[0].droppedPermissionMode 'bypassPermissions') -and
         (Same $r.Json.results[1].permissionMode 'plan') -and (Same $r.Tabs.Count 1) -and (Same $r.Tabs[0].dir $restoreDir) -and

@@ -14,11 +14,13 @@
     -Forget 2,4         drop those records without opening anything
     -ForgetAll          drop every candidate's record
 
+  -Ids and -Forget take row numbers or the rows' sessionId values. An id always means
+  the same session; a number only means the row it had in the list it came from.
+
   Every mode prunes records that can never be reopened: the transcript is gone, or it
   is not an interactive conversation. A reopened session gets back the permission mode
   it was started with when that mode is replayable; bypassPermissions never is, and
-  is reported as droppedPermissionMode. The numbers are only good against the list
-  they came from.
+  is reported as droppedPermissionMode.
 
   Prints one JSON object.
   code: OPEN_SESSIONS | NOTHING_TO_RESTORE | RESTORED | NOT_RESTORED | FORGOTTEN |
@@ -27,12 +29,14 @@
         RESUMED (RESUMED_UNTRUSTED after -AllowUntrusted) | UNTRUSTED_WORKSPACE |
         PATH_NOT_FOUND | ALREADY_RUNNING | CLAUDE_NOT_FOUND | INTERNAL_ERROR
 #>
-[CmdletBinding()]
+[CmdletBinding(PositionalBinding = $false)]
 param(
     [switch]$List,
     [switch]$All,
-    [int[]]$Ids,
-    [int[]]$Forget,
+    # Text, not [int[]]: pwsh -File hands "-Ids 1,3" over as the one string '1,3',
+    # which an [int[]] parameter reads as 13.
+    [string[]]$Ids,
+    [string[]]$Forget,
     [switch]$ForgetAll,
     [switch]$AllowUntrusted
 )
@@ -88,11 +92,18 @@ try {
         Exit-WithResult ([ordered]@{ ok = $true; code = 'OPEN_SESSIONS'; count = $rows.Count; pruned = $pruned; sessions = $rows })
     }
 
-    # Chosen numbers, first mention first; one that is not in the list stops everything.
-    $pick = if ($All -or $ForgetAll) { 1..$candidates.Count } else { @(@($Ids) + @($Forget) | Where-Object { $null -ne $_ } | Select-Object -Unique) }
-    $bad = @($pick | Where-Object { $_ -lt 1 -or $_ -gt $candidates.Count })
-    if ($bad.Count -or -not $pick) {
-        Exit-WithResult ([ordered]@{ ok = $false; code = 'NOT_IN_LIST'; numbers = $bad; count = $candidates.Count; sessions = $rows; message = 'Those numbers are not in the current list. Nothing was opened or forgotten; pick again from this list.' })
+    # Chosen rows, first mention first, by number or by sessionId; anything that is not in
+    # the current list stops everything.
+    $pick = 1..$candidates.Count
+    if (-not ($All -or $ForgetAll)) {
+        $row = @{}
+        for ($i = 0; $i -lt $candidates.Count; $i++) { $row[[string]($i + 1)] = $i + 1; $row[$candidates[$i].SessionId] = $i + 1 }
+        $asked = @(@($Ids) + @($Forget) | ForEach-Object { "$_" -split '[,\s]+' } | Where-Object { $_ })
+        $bad = @($asked | Where-Object { -not $row.ContainsKey($_) })
+        if ($bad.Count -or -not $asked) {
+            Exit-WithResult ([ordered]@{ ok = $false; code = 'NOT_IN_LIST'; notInList = $bad; count = $candidates.Count; sessions = $rows; message = 'Those rows are not in the current list. Nothing was opened or forgotten; pick again from this list.' })
+        }
+        $pick = @($asked | ForEach-Object { $row[$_] } | Select-Object -Unique)
     }
 
     if ($ForgetAll -or $PSBoundParameters.ContainsKey('Forget')) {
