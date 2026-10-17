@@ -200,10 +200,10 @@ function Open-OtherSessions {
         if ($DryRun) { continue }
         try {
             if ($wt) {
-                $args = @('-w', '0', 'nt', '-d', ($dir -replace ';', '\;'), '--', ($claude -replace ';', '\;'), '--resume', $id)
+                $wtArgs = @('-w', '0', 'nt', '-d', ($dir -replace ';', '\;'), '--', ($claude -replace ';', '\;'), '--resume', $id)
                 $psi = New-Object System.Diagnostics.ProcessStartInfo
                 $psi.FileName = $wt
-                $psi.Arguments = (@($args | ForEach-Object { ConvertTo-NativeArgument $_ }) -join ' ')
+                $psi.Arguments = (@($wtArgs | ForEach-Object { ConvertTo-NativeArgument $_ }) -join ' ')
                 $psi.UseShellExecute = $false
                 $psi.WorkingDirectory = $dir
                 $proc = [System.Diagnostics.Process]::Start($psi)
