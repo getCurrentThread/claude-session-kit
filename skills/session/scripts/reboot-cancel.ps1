@@ -26,7 +26,8 @@ $ErrorActionPreference = 'Stop'
 $kitRoot     = if ($env:CLAUDE_SESSION_KIT_HOME) { $env:CLAUDE_SESSION_KIT_HOME } else { Join-Path $env:USERPROFILE '.claude\claude-session-kit' }
 $planFile    = Join-Path $kitRoot 'plan.json'
 $stateFile   = Join-Path $kitRoot 'state.json'
-$legacyState = Join-Path $env:USERPROFILE '.claude\reboot-continue\state.json'
+# The older skill never knew CLAUDE_SESSION_KIT_HOME; set, it is a test sandbox.
+$legacyState = if ($env:CLAUDE_SESSION_KIT_HOME) { $null } else { Join-Path $env:USERPROFILE '.claude\reboot-continue\state.json' }
 $runOnceKey  = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce'
 $valueName   = 'ClaudeRebootContinue'
 
@@ -44,7 +45,7 @@ try {
     if ($Status) {
         $summary = $null
         foreach ($f in @($stateFile, $legacyState)) {
-            if (-not (Test-Path -LiteralPath $f)) { continue }
+            if (-not $f -or -not (Test-Path -LiteralPath $f)) { continue }
             try {
                 $s = Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json
                 $others = @($s.others | Where-Object { $_ } | ForEach-Object { [ordered]@{ sessionId = [string]$_.session_id; workdir = [string]$_.workdir } })
@@ -73,7 +74,7 @@ try {
 
     $removedFiles = @()
     foreach ($f in @($stateFile, $planFile, $legacyState)) {
-        if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force; $removedFiles += $f }
+        if ($f -and (Test-Path -LiteralPath $f)) { Remove-Item -LiteralPath $f -Force; $removedFiles += $f }
     }
 
     if ($runOnceError) {

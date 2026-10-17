@@ -38,7 +38,9 @@ try {
 
     # Run by hand, there is no hook input, only a keyboard to wait on.
     if (-not [Console]::IsInputRedirected) { exit 0 }
-    $hook = [Console]::In.ReadToEnd() | ConvertFrom-Json -AsHashtable
+    # Claude Code writes UTF-8; [Console]::In would decode it with the console code page
+    # (949 on a Korean install) and break the JSON on any non-ASCII path.
+    $hook = [IO.StreamReader]::new([Console]::OpenStandardInput(), [Text.UTF8Encoding]::new($false)).ReadToEnd() | ConvertFrom-Json -AsHashtable
     if ($hook -isnot [System.Collections.IDictionary]) { exit 0 }
 
     # stdin is the trust boundary: the id is checked before it names a file, and

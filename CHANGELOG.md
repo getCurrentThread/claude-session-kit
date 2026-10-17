@@ -22,12 +22,24 @@
 - **Titles.** A `/rename` or `--name` title now wins over the generated one wherever it sits in the
   transcript (head + last 64 KB are read), with the first typed prompt as a fallback; `titleSource`
   says which. `open-workspace.ps1` and `new-temp-task.ps1` take `-Name`.
-- **Search.** `search-sessions.ps1 -Query` finds sessions by title, folder or message text (every word
+- **Search.** `search-sessions.ps1 -Query` finds sessions by title, folder name or message text (every word
   must match; title > folder > text), with a one-line snippet; `rg` is used when installed.
 - **Retention.** `list-sessions.ps1` reports `cleanupPeriodDays` (read-only) and warns at 30 days or
   less; `archive-sessions.ps1` copies transcripts into `archive\` before Claude Code deletes them.
+- **Hardening from review.** A `-Name` that Windows Terminal or a `.cmd` shim would re-split into
+  extra `claude` arguments (quotes, backslashes, `%`, `& | < > ^ !`, control characters) is refused
+  with `INVALID_NAME`, before `new-temp-task.ps1` creates its folder. The hook reads its input as
+  UTF-8, so a non-ASCII folder or profile path is recorded on a CP949/CP437 console. Restore opens
+  each session in its transcript's folder and never offers the asking session. Run again by hand,
+  the logon script skips any session (the primary too) that is already open. The no-`wt` fallbacks
+  open folders whose names hold `[ ]`. A stale PID record without a start time counts as running only
+  for a claude/node process, and a timed-out `claude agents` is killed with its whole process tree.
+  Search matches a folder by its own name, not every parent in its path, and the `Select-String`
+  fallback matches ordinally like `rg`. The archive finds a registered transcript that moved into a
+  worktree's project folder and flushes each copy to disk before it replaces the old one; the
+  title tail window no longer drops a line that starts exactly on its edge.
 - Tests: the suite never runs the real `claude` (a stand-in answers `claude agents --json`), and a
-  check fails if it ever does.
+  check fails if it ever does. It opens no console window.
 
 ## 0.1.1
 

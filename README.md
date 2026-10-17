@@ -89,7 +89,9 @@ It is started as a top-level session: the asking session's markers (`CLAUDECODE`
 pass to the new tab, are dropped first — a `claude` that inherits them turns transcript saving off.
 
 `-Name "<name>"` starts the session under that name (`claude --name`), so the CLI's own picker, the
-tab title and this kit's lists all show it.
+tab title and this kit's lists all show it. A name with quotes, backslashes, `%` or `& | < > ^ !` is
+refused (`INVALID_NAME`): Windows Terminal re-splits the command line it hands on and would turn
+those into extra `claude` arguments.
 
 **Resume.** `resume-session.ps1` picks a session in this order: the **launcher registry** → a **scan of
 interactive transcripts from the last 30 days** → the **CLI's own picker** (`claude --resume`) in that
@@ -98,13 +100,14 @@ never used — it reopens whatever is newest in a folder, which may be an automa
 
 - **Never twice.** Before a tab is opened the kit asks which sessions are open right now
   (`claude agents --json`; failing that, the CLI's per-process records, each counted only while that
-  PID is alive *and* started at the recorded time). A session that is open is refused with
+  PID is alive *and* started at the recorded time, or with no start time is a claude/node process). A
+  session that is open is refused with
   `ALREADY_RUNNING` — two tabs on one conversation interleave their writes into one transcript.
   `-Fork` (`--fork-session`) is still allowed: it is a new conversation.
 - **Titles.** Lists show the name you gave (`/rename`, `--name`) over the CLI's generated title, and
   fall back to the first thing you typed (`titleSource` says which). The title is read from the head
   and the last 64 KB of the transcript, not the whole file.
-- **Search.** `search-sessions.ps1 -Query "<words>"` finds sessions whose title, folder or messages
+- **Search.** `search-sessions.ps1 -Query "<words>"` finds sessions whose title, folder name or messages
   contain every word (Hangul included), ranked title > folder > message text, with a one-line
   snippet. Only what you typed and what Claude answered is searched — not tool output. `rg` is used
   as a prefilter when it is installed.
@@ -116,7 +119,9 @@ never used — it reopens whatever is newest in a folder, which may be an automa
 purpose (`/exit`, Ctrl+C, `/clear`, `/resume`, logout delete it; a closed window, a crash or a power cut
 leave it). `restore-open.ps1` lists the records whose session is not running now and whose transcript
 still exists, reopens all or some of them (`-All`, `-Ids <sessionId>,…`) in their recorded folders, or
-forgets them (`-Forget`, `-ForgetAll`). Folder trust is checked per session, as everywhere else.
+forgets them (`-Forget`, `-ForgetAll`). Each opens in the folder its transcript records (the hook's
+own cwd can have moved with a `cd` or a worktree), and the asking session is never offered. Folder
+trust is checked per session, as everywhere else.
 
 **Retention.** Claude Code deletes transcripts older than `cleanupPeriodDays` (default 30) at startup,
 and a deleted session cannot be listed, searched or resumed. `list-sessions.ps1` reports the setting
@@ -212,7 +217,7 @@ All under `skills/session/scripts/`, all print one JSON object (`ok`, `code`, `m
 |---|---|---|
 | `list-aliases.ps1` | the alias table | none |
 | `list-sessions.ps1` | sessions that could be resumed, with title, `running` and the retention setting | none |
-| `search-sessions.ps1 -Query` | sessions by title, folder or message text | none |
+| `search-sessions.ps1 -Query` | sessions by title, folder name or message text | none |
 | `list-candidates.ps1` | most-used folders (`alias` is set on those already registered) | none |
 | `new-temp-task.ps1 [-Name]` | new scratch folder + new session | folder, terminal tab |
 | `open-workspace.ps1 -Alias\|-Path [-Name]` | new session in a workspace | terminal tab |

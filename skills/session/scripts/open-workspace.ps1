@@ -7,7 +7,7 @@
   An alias that is not in aliases.json is an error -- no other folder is ever
   guessed. Prints one JSON object.
   code: LAUNCHED | LAUNCHED_UNTRUSTED (-AllowUntrusted, the tab is on the trust prompt) |
-        UNTRUSTED_WORKSPACE | ALIAS_NOT_FOUND | NO_ALIASES | PATH_NOT_FOUND | CLAUDE_NOT_FOUND
+        UNTRUSTED_WORKSPACE | ALIAS_NOT_FOUND | NO_ALIASES | PATH_NOT_FOUND | CLAUDE_NOT_FOUND | INVALID_NAME
 
 .PARAMETER Name
   A display name for the session (`claude --name`): the tab title, the CLI's /resume

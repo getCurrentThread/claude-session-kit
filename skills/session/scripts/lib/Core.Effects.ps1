@@ -1,7 +1,8 @@
-# Core.Effects.ps1 -- the only file in lib/ that starts a process.
+# Core.Effects.ps1 -- the only file in lib/ that opens a terminal.
 #
 # Loaded by the scripts that open a terminal tab and by nothing else. The reboot
-# path never dot-sources it: reboot-plan.ps1 renders and records, and the two
+# path never dot-sources it: reboot-plan.ps1 renders and records (its one process
+# is Core.State's read-only `claude agents --json`), and the two
 # things that actually change the machine (the RunOnce value and `shutdown`) live
 # in reboot-commit.ps1 alone. tests/run-tests.ps1 enforces both halves.
 
@@ -44,8 +45,9 @@ function Start-ClaudeTerminal {
         return 'wt'
     }
     # No Windows Terminal: a plain console window. -WorkingDirectory instead of an
-    # interpolated `Set-Location "<path>"`, which a quote or '$' in the path breaks.
-    Start-Process -FilePath $ClaudeExe -ArgumentList @($ClaudeArgs | ForEach-Object { ConvertTo-QuotedArgument $_ }) -WorkingDirectory $WorkDir
+    # interpolated `Set-Location "<path>"`, which a quote or '$' in the path breaks;
+    # escaped, because -WorkingDirectory reads [ ] as wildcards.
+    Start-Process -FilePath $ClaudeExe -ArgumentList @($ClaudeArgs | ForEach-Object { ConvertTo-QuotedArgument $_ }) -WorkingDirectory ([WildcardPattern]::Escape($WorkDir))
     return 'console'
 }
 
@@ -64,6 +66,9 @@ function Invoke-SessionLaunch {
         [switch]$Fork,
         [switch]$AllowUntrusted
     )
+
+    $refusal = Get-NameRefusal $Name
+    if ($refusal) { return $refusal }
 
     $trusted = Test-WorkspaceTrusted -Path $WorkDir
     if (-not $trusted -and -not $AllowUntrusted) {

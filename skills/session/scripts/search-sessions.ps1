@@ -5,7 +5,7 @@
 
 .DESCRIPTION
   -Query is split on whitespace; a session matches when EVERY term occurs, ignoring
-  case, in its title, its folder (cwd) or the words of its messages. Rows rank by
+  case, in its title, its folder's name (the last part of cwd) or the words of its messages. Rows rank by
   where the terms were found -- title over folder over message text -- then newest
   first. Only interactive transcripts from the last -Days days are searched:
   scheduled and SDK runs, sidecars and subagent files never are.
@@ -74,7 +74,8 @@ try {
                 & $rg.Source --no-config --files-with-matches --fixed-strings --ignore-case --no-ignore --hidden --text --follow --max-depth $depth --glob '*.jsonl' -e $needle -- $root
             }
         } else {
-            Select-String -LiteralPath @($pool) -SimpleMatch -Pattern $needle -List -ErrorAction SilentlyContinue | ForEach-Object Path
+            # Ordinal: the current culture (tr-TR, decomposed accents) would drop what the matcher accepts.
+            Select-String -LiteralPath @($pool) -SimpleMatch -Culture Ordinal -Pattern $needle -List -ErrorAction SilentlyContinue | ForEach-Object Path
         }
         $pool.IntersectWith([string[]]@($hits | Where-Object { $_ } | ForEach-Object { [IO.Path]::GetFullPath($_) }))
     }
@@ -92,13 +93,19 @@ try {
     foreach ($s in $candidates) {
         # no recorded folder: nowhere to reopen it, so list-sessions leaves it out too
         if (-not $s.Cwd -or $s.SessionId -eq $self -or -not $pool.Contains($s.TranscriptPath)) { continue }
-        $body = Search-TranscriptMessages -TranscriptPath $s.TranscriptPath -Terms $terms.ToArray()
+        # The folder's own name, not its path: every folder under C:\Users\<name>\Downloads
+        # would match 'users' and 'downloads'.
+        $folder = Split-Path $s.Cwd -Leaf
         $in = [ordered]@{ title = @{}; cwd = @{}; body = @{} }   # field -> the terms found in it
         foreach ($t in $terms) {
             if ($s.Title -and $s.Title.IndexOf($t, $ic) -ge 0) { $in.title[$t] = $true }
-            if ($s.Cwd -and $s.Cwd.IndexOf($t, $ic) -ge 0) { $in.cwd[$t] = $true }
+            if ($folder.IndexOf($t, $ic) -ge 0) { $in.cwd[$t] = $true }
         }
-        foreach ($t in $body.Found) { $in.body[$t] = $true }
+        # Only the terms still missing are looked for in the text: one found in the title
+        # or folder scores no higher there, and searching for it could read every line.
+        $rest = @($terms | Where-Object { -not $in.title[$_] -and -not $in.cwd[$_] })
+        $body = if ($rest) { Search-TranscriptMessages -TranscriptPath $s.TranscriptPath -Terms $rest } else { $null }
+        if ($body) { foreach ($t in $body.Found) { $in.body[$t] = $true } }
 
         # Each term counts once, by the best field it was found in: title 3, folder 2, body 1.
         $score = 0
@@ -111,7 +118,7 @@ try {
         $rows.Add([pscustomobject]@{
                 sessionId = $s.SessionId; cwd = $s.Cwd; alias = $aliased[(ConvertTo-NormalizedPath $s.Cwd).ToLowerInvariant()]
                 title = $s.Title; titleSource = $s.TitleSource; lastWrite = $s.LastWrite; score = $score
-                matchedIn = @($in.Keys | Where-Object { $in[$_].Count -gt 0 }); snippet = $body.Snippet
+                matchedIn = @($in.Keys | Where-Object { $in[$_].Count -gt 0 }); snippet = $(if ($body) { $body.Snippet } else { $null })
             })
     }
 

@@ -1,4 +1,5 @@
-# Core.State.ps1 -- reads and writes files; starts nothing, registers nothing.
+# Core.State.ps1 -- reads and writes files; registers nothing, and starts only the
+# read-only `claude agents --json` (Get-RunningSessions).
 #
 # Everything the kit remembers lives OUTSIDE the plugin folder, under
 # ~/.claude/claude-session-kit/. An installed plugin sits in a versioned cache
@@ -343,9 +344,10 @@ function Get-ClaudeSessionRecord {
             while ($lines.Count -lt $HeadLines -and -not $reader.EndOfStream) { $lines.Add($reader.ReadLine()) }
             if (-not $reader.EndOfStream) {
                 $start = [Math]::Max(0, $fs.Length - $TailBytes)
-                $fs.Position = $start
+                # One byte early, so the first piece is always a part line to drop: empty
+                # when the window starts right at a line start, never a whole line.
+                $fs.Position = [Math]::Max(0, $start - 1)
                 $tail = @([IO.StreamReader]::new($fs, [Text.Encoding]::UTF8).ReadToEnd() -split "`r?`n")
-                # the window starts mid-line unless it starts at the top
                 if ($start -gt 0) { $tail = @($tail | Select-Object -Skip 1) }
             }
         } finally { $fs.Dispose() }
@@ -372,8 +374,8 @@ function Get-ClaudeSessionRecord {
 # Which -Terms occur in the words of a transcript (Get-MessageText, case-insensitive),
 # plus one line around the first hit. Only lines holding a term somewhere are parsed.
 # shortcut: matching is OrdinalIgnoreCase; a few exotic letters (Turkish dotted and
-# dotless i, decomposed accents) fold differently in rg/Select-String, so a session
-# hinging on one of them can differ between the two prefilters. Fine for prose search.
+# dotless i, decomposed accents) fold differently in rg (Select-String runs Ordinal), so
+# a session hinging on one of them can differ between the two prefilters. Fine for prose.
 function Search-TranscriptMessages {
     param([Parameter(Mandatory)][string]$TranscriptPath, [Parameter(Mandatory)][string[]]$Terms, [int]$SnippetLength = 120)
     $ic = [StringComparison]::OrdinalIgnoreCase
@@ -444,6 +446,8 @@ function Get-ClaudeSessions {
 # Claude Code deletes transcripts older than cleanupPeriodDays (default 30) from its
 # user settings.json. This only reports the number. Nothing in this kit writes that
 # file: it holds the person's permissions, hooks and environment.
+# shortcut: the user's own settings.json only; managed policy or project settings can set a
+# lower value that wins. Read managed-settings.json too if that turns out to bite.
 function Get-TranscriptRetention {
     $settingsFile = Join-Path (Get-ClaudeHome) 'settings.json'
     try {
@@ -460,8 +464,9 @@ function Get-TranscriptRetention {
 # answer (Claude Code 2.1.139+) and the only process this file starts: a read-only
 # query with fixed arguments. When it is missing or fails, the CLI's own per-process
 # records (<claude home>\sessions\<pid>.json) are read instead, and one counts only
-# while that PID is alive AND was started at the recorded time -- Windows reuses
-# PIDs, so a live PID alone may be anybody's process.
+# while that PID is alive AND was started at the recorded time (or, with no start time
+# to compare, is a claude or node process) -- Windows reuses PIDs, so a live PID alone
+# may be anybody's process.
 # Rows: SessionId, Pid, Kind (interactive | background | ...), Cwd, Name, Status, Source.
 function Get-RunningSessions {
     $rows = $null
@@ -484,7 +489,8 @@ function Get-RunningSessions {
                         }
                     })
             } else {
-                try { $p.Kill() } catch {}
+                # The whole tree: behind a .cmd shim the hung claude holds our stdout open.
+                try { $p.Kill($true) } catch {}
             }
         } catch { $rows = $null }
     }
@@ -496,12 +502,13 @@ function Get-RunningSessions {
         if (-not $r -or -not (Test-SessionIdFormat ([string]$r['sessionId'])) -or -not $r['pid']) { continue }
         $proc = Get-Process -Id ([int]$r['pid']) -ErrorAction SilentlyContinue
         if (-not $proc) { continue }
-        # procStart is the creation time as a FILETIME. Unreadable (an elevated process)
-        # leaves the PID as the only evidence, and it is taken: a refused duplicate is
-        # cheaper than two tabs writing one transcript.
+        # procStart is the creation time as a FILETIME. Without it, or with the start time
+        # unreadable (an elevated process), a live PID still counts when it is a claude or
+        # node process: a refused duplicate is cheaper than two tabs writing one transcript.
         $started = $null
         try { $started = $proc.StartTime.ToUniversalTime().ToFileTimeUtc() } catch {}
-        if ($r['procStart'] -and $null -ne $started -and $started -ne [long]$r['procStart']) { continue }
+        if ($r['procStart'] -and $null -ne $started) { if ($started -ne [long]$r['procStart']) { continue } }
+        elseif ($proc.ProcessName -notin 'claude', 'node') { continue }
         [pscustomobject]@{
             SessionId = [string]$r['sessionId']; Pid = [int]$r['pid']; Kind = [string]$r['kind']; Cwd = [string]$r['cwd']
             Name = [string]$r['name']; Status = [string]$r['status']; Source = 'pidfile'

@@ -54,6 +54,8 @@ try {
 
     $running = @{}
     foreach ($r in @(Get-RunningSessions)) { $running[$r.SessionId] = $true }
+    # The asking session is open whatever the CLI could tell us.
+    if ($env:CLAUDE_CODE_SESSION_ID) { $running[$env:CLAUDE_CODE_SESSION_ID] = $true }
 
     $pruned = 0
     $found = [System.Collections.Generic.List[object]]::new()
@@ -71,7 +73,9 @@ try {
             $pruned++; continue
         }
         $found.Add([pscustomobject]@{
-                SessionId = $rec.SessionId; Cwd = $rec.Cwd; Title = $info.Title; LastWrite = $info.LastWrite
+                # The transcript's own folder, as resume-session and reboot-plan use: the hook
+                # rewrites cwd on every compact, after a `cd` or a move into a worktree.
+                SessionId = $rec.SessionId; Cwd = $(if ($info.Cwd) { $info.Cwd } else { $rec.Cwd }); Title = $info.Title; LastWrite = $info.LastWrite
                 PermissionMode = $(if ($rec.PermissionMode) { $rec.PermissionMode } else { $null })
             })
     }

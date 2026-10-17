@@ -12,7 +12,7 @@
   and reusing its number would drop the new session into that old history.
 
   Prints one JSON object. code: LAUNCHED | LAUNCHED_UNTRUSTED (-AllowUntrusted, the tab is on the
-  trust prompt) | UNTRUSTED_WORKSPACE | PATH_NOT_FOUND | CLAUDE_NOT_FOUND
+  trust prompt) | UNTRUSTED_WORKSPACE | PATH_NOT_FOUND | CLAUDE_NOT_FOUND | INVALID_NAME
 
 .PARAMETER Name
   A display name for the session (`claude --name`): the tab title, the CLI's /resume
@@ -48,6 +48,9 @@ try {
                 message = 'The scratch root is not trusted in Claude Code. No folder was created and no session was started.'
             })
     }
+
+    $refusal = Get-NameRefusal $Name   # before the folder exists, for the same reason
+    if ($refusal) { Exit-WithResult $refusal }
 
     $disk = @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue | ForEach-Object Name)
     $history = @(Get-ChildItem -LiteralPath (Get-ClaudeProjectsDir) -Directory -ErrorAction SilentlyContinue | ForEach-Object Name)

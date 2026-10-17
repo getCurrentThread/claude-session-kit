@@ -94,6 +94,8 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/open-
 When the user gives the new session a name ("open the blog folder and call it refactor"), add
 `-Name "<name>"` to either script. It becomes the session's display name (`claude --name`): the tab
 title, the CLI's own `/resume` picker and `list-sessions.ps1` all show it. Never make a name up.
+`INVALID_NAME` — the name holds a character that cannot pass through the terminal safely (quotes,
+backslashes, `%`, `& | < > ^ !`); nothing was opened. Offer the name without them.
 
 The session opens as a new tab in the existing Windows Terminal window (a plain console window when
 `wt` is absent). Its id and folder are recorded in the registry (`sessions.jsonl`), which is where §2
@@ -177,8 +179,9 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/searc
 ```
 
 Every whitespace-separated term has to appear (case-insensitive; Korean works — use stems without
-particles). Rows rank by where the terms were found — `title` over folder over message text — and
-carry `score`, `matchedIn` and `snippet` (one line around the first hit in the messages). Only
+particles). Rows rank by where the terms were found — `title` over the folder's name over message
+text — and carry `score`, `matchedIn` and `snippet` (one line around the first hit in the messages,
+when a term was not already in the title or folder name). Only
 interactive sessions are searched. `SEARCH_RESULTS` with an empty `sessions` list means nothing
 matched: say so, and offer other words or a larger `-Days`. Show the rows (title, folder, date), let
 the user pick, then resume with `-SessionId`.
@@ -204,6 +207,9 @@ Safety rules:
 - `ALREADY_RUNNING` — that session is open right now (`list-sessions.ps1` marks it `running: true`),
   so nothing was opened. If its `sessionId` is this very session, say so and show the list instead;
   otherwise tell the user to switch to that tab, and offer `-Fork` only if they want a copy.
+- `RESUMED` with `permissionMode` — the tab got back the mode that session was started with (a crash
+  left its record); name the mode to the user. With `droppedPermissionMode` instead, it was
+  `bypassPermissions`, which is never replayed: say the tab now asks for permissions as usual.
 
 ## 3. Reboot — restart the computer and continue this session
 
@@ -362,7 +368,8 @@ the set that was open. Same Gate 1 as §1 (an open verb), with "what was open" a
 Claude Code deletes transcripts older than `cleanupPeriodDays` (default 30, in `settings.json` in the
 Claude config folder), and a deleted session cannot be listed, searched or resumed. When
 `list-sessions.ps1` returns a `warning` (`retentionDays` is 30 or less), relay it once and offer the
-two ways to keep older sessions:
+two ways to keep older sessions. `retentionDays` comes from the user's own `settings.json` only: an
+organisation's managed settings or a project's settings can set a lower value, which then wins.
 
 - **Raise the setting** to a large value such as 3650 — **never 0**: since v2.1.89 it is rejected, and
   older versions took 0 as "save no transcripts". No script in this kit writes `settings.json`; the

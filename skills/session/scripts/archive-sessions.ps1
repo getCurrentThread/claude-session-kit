@@ -46,7 +46,12 @@ try {
     # Every registry row, however old: a long-lived session can outlast any window.
     foreach ($r in @(Get-RegisteredSessions -Days 36500)) {
         $t = Join-Path (Get-ProjectTranscriptDir $r.Cwd) ($r.SessionId + '.jsonl')
-        if (Test-Path -LiteralPath $t -PathType Leaf) { $sources[$r.SessionId] = $t }
+        # EnterWorktree moves a transcript to the worktree's project folder: look there too.
+        if (-not (Test-Path -LiteralPath $t -PathType Leaf)) {
+            $t = Get-ChildItem -LiteralPath (Get-ClaudeProjectsDir) -Directory -ErrorAction SilentlyContinue |
+                ForEach-Object { Join-Path $_.FullName ($r.SessionId + '.jsonl') } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+        }
+        if ($t) { $sources[$r.SessionId] = $t }
     }
     if ($All) {
         foreach ($s in @(Get-ClaudeSessions -Days $Days)) { $sources[$s.SessionId] = $s.TranscriptPath }
@@ -72,7 +77,9 @@ try {
             $in = [IO.File]::Open($src.FullName, 'Open', 'Read', 'ReadWrite, Delete')   # a live session holds it open
             try {
                 $out = [IO.File]::Open($tmp, 'Create', 'Write', 'None')
-                try { $in.CopyTo($out) } finally { $out.Dispose() }
+                # Flushed to disk before the move: after a power cut the rename can survive
+                # while cached data does not, leaving a zeroed copy that looks up to date.
+                try { $in.CopyTo($out); $out.Flush($true) } finally { $out.Dispose() }
             } finally { $in.Dispose() }
             [IO.File]::SetLastWriteTimeUtc($tmp, $stamp)
             [IO.File]::Move($tmp, $dest, $true)

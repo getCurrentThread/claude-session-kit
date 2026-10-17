@@ -56,8 +56,9 @@ function Wait-BeforeClose {
 
 Write-Log "resume-after-reboot started (DryRun=$([bool]$DryRun))"
 
-if (-not (Test-Path -LiteralPath $stateFile)) {
-    # One release of grace for a reboot scheduled by the older standalone skill.
+if (-not (Test-Path -LiteralPath $stateFile) -and -not $env:CLAUDE_SESSION_KIT_HOME) {
+    # One release of grace for a reboot scheduled by the older standalone skill, which
+    # never knew CLAUDE_SESSION_KIT_HOME (set, it is a test sandbox).
     $legacy = Join-Path $env:USERPROFILE '.claude\reboot-continue\state.json'
     if (Test-Path -LiteralPath $legacy) { $stateFile = $legacy }
 }
@@ -167,6 +168,24 @@ function ConvertTo-NativeArgument([string]$Value) {
     $escaped = $Value -replace '(\\*)"', '$1$1\"'
     return '"' + ($escaped -replace '(\\+)\z', '$1$1') + '"'
 }
+# A rerun by hand (the folder came back later, see above) must not open a session a
+# second time. The CLI keeps <config>\sessions\<pid>.json for each live one: the same
+# rule as Get-RunningSessions in lib/, without asking `claude agents`.
+function Test-SessionRunning([string]$Id) {
+    $cfg = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }
+    foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $cfg 'sessions') -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
+        try {
+            $r = Get-Content -LiteralPath $f.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ([string]$r.sessionId -ne $Id -or -not $r.pid) { continue }
+            $proc = Get-Process -Id ([int]$r.pid) -ErrorAction Stop
+            $started = $null
+            try { $started = $proc.StartTime.ToUniversalTime().ToFileTimeUtc() } catch {}
+            if ($r.procStart -and $null -ne $started) { if ($started -eq [long]$r.procStart) { return $true } }
+            elseif ($proc.ProcessName -in 'claude', 'node') { return $true }
+        } catch {}
+    }
+    return $false
+}
 function Open-OtherSessions {
     $wt = $null
     # Narrow executable override for hermetic resume tests, like CLAUDE_CODE_BIN.
@@ -195,6 +214,7 @@ function Open-OtherSessions {
             Start-Sleep -Seconds 3
         }
         if (-not $exists) { Write-Log "Skipping session $id : saved workdir '$dir' not found."; continue }
+        if (Test-SessionRunning $id) { Write-Log "Skipping session $id : already open in another terminal."; continue }
         $launcher = if ($wt) { 'wt tab' } else { 'console' }
         Write-Log "Other session $id : $launcher in $dir (no prompt)."
         if ($DryRun) { continue }
@@ -210,11 +230,16 @@ function Open-OtherSessions {
                 $proc.WaitForExit()
                 $proc.Dispose()
             } else {
-                Start-Process -FilePath $claude -ArgumentList @('--resume', $id) -WorkingDirectory $dir
+                # Escaped: -WorkingDirectory reads [ ] as wildcards and would not find the folder.
+                Start-Process -FilePath $claude -ArgumentList @('--resume', $id) -WorkingDirectory ([WildcardPattern]::Escape($dir))
             }
         } catch { Write-Log "Could not reopen other session $id : $($_.Exception.Message)" }
     }
 }
+
+# Only a rerun by hand can find it open: right after the reboot nothing is.
+$primaryOpen = ($sessionId -match $uuid) -and (Test-SessionRunning $sessionId)
+if ($primaryOpen) { Write-Log "Session $sessionId is already open in another terminal; it is not opened a second time." }
 
 if ($DryRun) {
     Open-OtherSessions
@@ -230,6 +255,7 @@ if ($delivery -eq 'file') {
 Move-Item -LiteralPath $stateFile -Destination (Join-Path (Split-Path -Parent $stateFile) 'state.last.json') -Force
 
 Open-OtherSessions
+if ($primaryOpen) { Wait-BeforeClose; exit 0 }
 
 Start-Sleep -Seconds 3
 if ($ownCommandLine) {
