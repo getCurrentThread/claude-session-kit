@@ -57,11 +57,14 @@ try {
         $rows.Add([pscustomobject]@{ sessionId = $s.SessionId; cwd = $s.Cwd; alias = $null; title = $s.Title; lastWrite = $s.LastWrite; source = 'scan' })
     }
 
+    $running = @{}
+    foreach ($r in @(Get-RunningSessions)) { $running[$r.SessionId] = $true }
     $sorted = @($rows | Sort-Object lastWrite -Descending | Select-Object -First $Top | ForEach-Object {
             [ordered]@{
                 sessionId = $_.sessionId; cwd = $_.cwd; alias = $_.alias; title = $_.title
                 lastWrite = $_.lastWrite.ToString('yyyy-MM-dd HH:mm'); source = $_.source
                 cwdExists = [bool](Test-Path -LiteralPath $_.cwd -PathType Container)
+                running = $running.ContainsKey($_.sessionId)
             }
         })
     Exit-WithResult ([ordered]@{ ok = $true; code = 'SESSIONS'; scope = $scope; days = $Days; total = $rows.Count; sessions = $sorted })

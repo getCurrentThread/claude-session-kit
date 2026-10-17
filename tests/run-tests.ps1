@@ -326,7 +326,8 @@ $fork = Invoke-SessionLaunch -WorkDir $Dir -Mode resume -SessionId $Id -Fork -Al
         (Same $r.Json.code 'UNTRUSTED_WORKSPACE') -and -not (Get-ChildItem -LiteralPath $declined -Directory)
     }
     Check 'list-sessions: registry first, then scan, no automation' {
-        $r = Invoke-Script 'list-sessions.ps1' @('-Alias', 'good')
+        # It asks which sessions are running: the stand-in answers, since the real CLI rewrites the sandbox's .claude.json.
+        try { $env:CLAUDE_CODE_BIN = $agentsOk; $r = Invoke-Script 'list-sessions.ps1' @('-Alias', 'good') } finally { $env:CLAUDE_CODE_BIN = $null }
         (Same @($r.Json.sessions.sessionId | Sort-Object) @(@($old, $newer) | Sort-Object)) -and (Same (@($r.Json.sessions | Where-Object sessionId -eq $old)[0].source) 'registry')
     }
     Check 'list-candidates: groups by recorded cwd and marks aliased folders' {
@@ -334,6 +335,183 @@ $fork = Invoke-SessionLaunch -WorkDir $Dir -Mode resume -SessionId $Id -Fork -Al
         $row = @($r.Json.candidates | Where-Object { $_.path -eq $plain })[0]
         # 3 = both recent sessions plus the 45-day-old one: this listing looks back 90 days
         (Same $r.Json.code 'CANDIDATES') -and (Same $row.sessions 3) -and (Same $row.alias 'good')
+    }
+
+    Write-Host "`nOpen sessions and restore (sandbox)"
+    $hookScript = Join-Path $scripts 'track-session.ps1'
+    $openDir = Get-KitPath openSessions
+    function Get-OpenRecordFile([string]$Id) { Join-Path $openDir "$Id.json" }
+    function New-HookInput([string]$Event, [string]$Id, [hashtable]$Extra = @{}) {
+        $o = [ordered]@{ session_id = $Id; transcript_path = (Join-Path (Get-ProjectTranscriptDir $plain) "$Id.jsonl"); cwd = $plain; hook_event_name = $Event }
+        foreach ($k in $Extra.Keys) { $o[$k] = $Extra[$k] }
+        return ($o | ConvertTo-Json -Compress)
+    }
+    # Hands the hook its input on stdin, the way Claude Code does. CLAUDE_PID is always set
+    # explicitly: inherited from a session running this suite, it would name the real claude.
+    function Invoke-Hook([string]$Json, [string]$Entrypoint = 'cli', [string]$ClaudePid = '') {
+        $keep = @{ ep = $env:CLAUDE_CODE_ENTRYPOINT; cp = $env:CLAUDE_PID }
+        try {
+            $env:CLAUDE_CODE_ENTRYPOINT = $Entrypoint; $env:CLAUDE_PID = $ClaudePid
+            $out = $Json | & pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $hookScript 2>&1
+            return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Text = (@($out | ForEach-Object { "$_" }) -join "`n") }
+        } finally { $env:CLAUDE_CODE_ENTRYPOINT = $keep.ep; $env:CLAUDE_PID = $keep.cp }
+    }
+
+    Check 'command line: split by the Win32 backslash and quote rules' {
+        Same (Split-CommandLine 'a "b c" d\\"e f" "g\"h" i\j') @('a', 'b c', 'd\e f', 'g"h', 'i\j')
+    }
+    Check 'start mode: read off the claude command line; a prompt that merely mentions the flag is not the flag' {
+        (Same (Get-StartPermissionMode '"C:\bin\claude.exe" --permission-mode plan --name "a b"') 'plan') -and
+        (Same (Get-StartPermissionMode 'claude.exe --permission-mode=acceptEdits') 'acceptEdits') -and
+        (Same (Get-StartPermissionMode 'claude.exe --permission-mode plan --dangerously-skip-permissions') 'bypassPermissions') -and
+        ($null -eq (Get-StartPermissionMode 'claude.exe "fix the --permission-mode plan bug"')) -and
+        ($null -eq (Get-StartPermissionMode 'claude.exe "say \"--permission-mode plan\" now"')) -and
+        ($null -eq (Get-StartPermissionMode 'claude.exe --resume x -- --permission-mode plan')) -and
+        ($null -eq (Get-StartPermissionMode 'claude.exe --permission-mode "plan & calc"')) -and
+        ($null -eq (Get-StartPermissionMode ''))
+    }
+    Check 'hook: an interactive SessionStart records the session and the mode it started with, and prints nothing' {
+        # A stand-in for the claude process, so its command line carries the flag.
+        $sleeper = Join-Path $sandbox 'sleeper.ps1'; [IO.File]::WriteAllText($sleeper, 'Start-Sleep -Seconds 60')
+        $psi = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
+        foreach ($a in '-NoProfile', '-File', $sleeper, '--permission-mode', 'plan') { $psi.ArgumentList.Add($a) }
+        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+        $fake = [Diagnostics.Process]::Start($psi)
+        $id = [guid]::NewGuid().ToString()
+        try { $r = Invoke-Hook (New-HookInput 'SessionStart' $id @{ source = 'startup' }) -ClaudePid $fake.Id } finally { try { $fake.Kill() } catch {} }
+        $rec = Get-Content -LiteralPath (Get-OpenRecordFile $id) -Raw | ConvertFrom-Json
+        Remove-OpenSessionRecord -SessionId $id   # it has no transcript: restore-open would prune it
+        (Same $r.ExitCode 0) -and (Same $r.Text '') -and (Same $rec.sessionId $id) -and (Same $rec.cwd $plain) -and
+        (Same $rec.permissionMode 'plan') -and (Same $rec.source 'startup') -and ($rec.transcriptPath -like "*$id.jsonl")
+    }
+    Check 'hook: SDK, background and unmarked sessions are never recorded' {
+        $sdk = [guid]::NewGuid().ToString(); $bg = [guid]::NewGuid().ToString(); $bare = [guid]::NewGuid().ToString()
+        $a = Invoke-Hook (New-HookInput 'SessionStart' $sdk) -Entrypoint 'sdk-cli'
+        $sessDir = New-Item -ItemType Directory -Force -Path (Join-Path $cfgDir 'sessions') | ForEach-Object FullName
+        [IO.File]::WriteAllText((Join-Path $sessDir '999999.json'), '{"pid":999999,"kind":"background","entrypoint":"cli"}')
+        try { $b = Invoke-Hook (New-HookInput 'SessionStart' $bg) -ClaudePid '999999' } finally { Remove-Item -LiteralPath $sessDir -Recurse -Force }
+        $c = Invoke-Hook (New-HookInput 'SessionStart' $bare) -Entrypoint ''
+        (Same @($a.ExitCode, $b.ExitCode, $c.ExitCode) @(0, 0, 0)) -and (Same ($a.Text + $b.Text + $c.Text) '') -and
+        -not (Test-Path (Get-OpenRecordFile $sdk)) -and -not (Test-Path (Get-OpenRecordFile $bg)) -and -not (Test-Path (Get-OpenRecordFile $bare))
+    }
+    Check 'hook: a deliberate SessionEnd deletes the record; other and unknown reasons keep it' {
+        $ends = [ordered]@{ prompt_input_exit = $false; clear = $false; other = $true; 'some-future-reason' = $true }
+        foreach ($reason in @($ends.Keys)) {
+            $id = [guid]::NewGuid().ToString()
+            Set-OpenSessionRecord -SessionId $id -Cwd $plain -Source startup
+            $r = Invoke-Hook (New-HookInput 'SessionEnd' $id @{ reason = $reason })
+            if ($r.ExitCode -ne 0 -or $r.Text) { throw "SessionEnd/$reason printed or failed" }
+            if ((Test-Path (Get-OpenRecordFile $id)) -ne $ends[$reason]) { throw "SessionEnd/$reason left the record in the wrong state" }
+            Remove-OpenSessionRecord -SessionId $id
+        }
+        $true
+    }
+    Check 'hook: malformed input or a bad session id exits 0, prints nothing and writes nothing' {
+        $before = @(Get-ChildItem -LiteralPath $openDir -Name)
+        foreach ($in in @('', 'not json', '[1,2]', '{"hook_event_name":"SessionStart","session_id":"..\\..\\escape"}',
+                '{"hook_event_name":"SessionStart","session_id":"11111111-1111-1111-1111-111111111111\n"}')) {
+            $r = Invoke-Hook $in
+            if ($r.ExitCode -ne 0 -or $r.Text) { throw "input '$in' gave exit $($r.ExitCode) / '$($r.Text)'" }
+        }
+        (Same @(Get-ChildItem -LiteralPath $openDir -Name) $before) -and -not (Get-ChildItem -LiteralPath $sandbox -Recurse -Filter 'escape*')
+    }
+
+    # restore-open: transcripts in folders of their own, so the reboot tests' "newest session" stays theirs.
+    $restoreDir = New-Item -ItemType Directory -Force -Path (Join-Path $work 'trusted-parent\restore') | ForEach-Object FullName
+    $restoreUntrusted = New-Item -ItemType Directory -Force -Path (Join-Path $work 'restore-untrusted') | ForEach-Object FullName
+    function Add-OpenSession([string]$Cwd, [string]$Entrypoint, [datetime]$When, [string]$Title, [string]$Mode) {
+        $id = New-Transcript -Cwd $Cwd -Entrypoint $Entrypoint -When $When -Title $Title
+        Set-OpenSessionRecord -SessionId $id -Cwd $Cwd -TranscriptPath (Join-Path (Get-ProjectTranscriptDir $Cwd) "$id.jsonl") -PermissionMode $Mode -Source startup
+        return $id
+    }
+    $liveId = Add-OpenSession $restoreDir 'cli' (Get-Date).AddMinutes(-1) 'still open'
+    $lostA = Add-OpenSession $restoreDir 'cli' (Get-Date).AddMinutes(-10) 'lost A' 'plan'
+    $lostB = Add-OpenSession $restoreUntrusted 'cli' (Get-Date).AddMinutes(-5) 'lost B' 'bypassPermissions'
+    $autoId = Add-OpenSession $restoreDir 'sdk-cli' (Get-Date).AddMinutes(-2) $null
+    $vanished = Add-OpenSession $restoreDir 'cli' (Get-Date).AddMinutes(-3) 'vanished'
+    Remove-Item -LiteralPath (Join-Path (Get-ProjectTranscriptDir $restoreDir) "$vanished.jsonl")
+    $restoreAgents = Join-Path $agentsDir 'restore-claude.cmd'
+    [IO.File]::WriteAllText($restoreAgents, "@echo off`r`necho [{`"pid`":4343,`"cwd`":`"C:\\w`",`"kind`":`"interactive`",`"sessionId`":`"$liveId`",`"status`":`"idle`"}]`r`n")
+    function Invoke-Restore([string[]]$Arguments = @()) {
+        try { $env:CLAUDE_CODE_BIN = $restoreAgents; return (Invoke-Script 'restore-open.ps1' $Arguments) } finally { $env:CLAUDE_CODE_BIN = $null }
+    }
+    # Runs a script with the launcher stubbed: the stub records each tab instead of opening it.
+    $launchLog = Join-Path $agentsDir 'launches.jsonl'
+    $stubRunner = Join-Path $agentsDir 'stub-runner.ps1'
+    [IO.File]::WriteAllText($stubRunner, @'
+param($Lib, $Script, $Log, $ArgsJson)
+. $Lib
+function Start-ClaudeTerminal { param($WorkDir, $ClaudeExe, $ClaudeArgs) Add-Content -LiteralPath $Log -Value (@{ dir = $WorkDir; argv = @($ClaudeArgs) } | ConvertTo-Json -Compress); 'stub' }
+function Register-LaunchedSession {}
+$line = '. "$PSScriptRoot\lib\Core.Effects.ps1"'
+$src = [IO.File]::ReadAllText($Script)
+# Without that line removed, the script would load the real launcher over the stubs.
+if (-not $src.Contains($line)) { throw 'the script no longer loads Core.Effects the expected way' }
+$src = $src.Replace($line, '') -replace '(?m)^#requires.*$', ''
+$splat = $ArgsJson | ConvertFrom-Json -AsHashtable
+& ([scriptblock]::Create($src)) @splat
+'@)
+    function Invoke-Stubbed([string]$Name, [string]$ArgsJson) {
+        Remove-Item -LiteralPath $launchLog -ErrorAction Ignore
+        try {
+            $env:CLAUDE_CODE_BIN = $restoreAgents
+            $out = & pwsh -NoProfile -ExecutionPolicy Bypass -File $stubRunner -Lib (Join-Path $scripts 'lib\Core.Effects.ps1') -Script (Join-Path $scripts $Name) -Log $launchLog -ArgsJson $ArgsJson 2>&1
+        } finally { $env:CLAUDE_CODE_BIN = $null }
+        $json = $null; try { $json = (@($out | ForEach-Object { "$_" }) | Where-Object { $_ -match '^\{' } | Select-Object -Last 1) | ConvertFrom-Json } catch {}
+        $tabs = @(if (Test-Path -LiteralPath $launchLog) { Get-Content -LiteralPath $launchLog | ForEach-Object { $_ | ConvertFrom-Json } })
+        return [pscustomobject]@{ Json = $json; Tabs = $tabs }
+    }
+
+    Check 'restore-open: lists only sessions that are not running, newest first; prunes vanished and automated records' {
+        $r = Invoke-Restore
+        (Same $r.ExitCode 0) -and (Same $r.Json.code 'OPEN_SESSIONS') -and (Same @($r.Json.sessions.sessionId) @($lostB, $lostA)) -and
+        (Same @($r.Json.sessions.n) @(1, 2)) -and (Same $r.Json.sessions[1].title 'lost A') -and (Same $r.Json.sessions[1].permissionMode 'plan') -and
+        (Same $r.Json.sessions[1].cwdExists $true) -and (Same $r.Json.pruned 2) -and
+        (Test-Path (Get-OpenRecordFile $liveId)) -and -not (Test-Path (Get-OpenRecordFile $vanished)) -and -not (Test-Path (Get-OpenRecordFile $autoId))
+    }
+    Check 'restore-open: -Forget takes "3,<id>" as pwsh -File hands it over and opens nothing; a row not in the list or two actions are refused' {
+        $extra = Add-OpenSession $restoreDir 'cli' (Get-Date).AddMinutes(-30) 'forget me'
+        $extra2 = Add-OpenSession $restoreDir 'cli' (Get-Date).AddMinutes(-40) 'forget me too'
+        $bad = Invoke-Restore @('-Forget', '3,9')
+        $both = Invoke-Restore @('-All', '-Forget', '3')
+        $kept = (Test-Path (Get-OpenRecordFile $extra)) -and (Test-Path (Get-OpenRecordFile $extra2))
+        $f = Invoke-Restore @('-Forget', "3,$extra2")
+        (Same $bad.Json.code 'NOT_IN_LIST') -and (Same @($bad.Json.notInList) @('9')) -and (Same $both.Json.code 'CONFLICTING_OPTIONS') -and $kept -and
+        (Same $f.Json.code 'FORGOTTEN') -and (Same @($f.Json.forgotten.sessionId) @($extra, $extra2)) -and
+        -not (Test-Path (Get-OpenRecordFile $extra)) -and -not (Test-Path (Get-OpenRecordFile $extra2)) -and
+        (Test-Path (Get-OpenRecordFile $lostA)) -and (Test-Path (Get-OpenRecordFile $lostB))
+    }
+    Check 'restore-open -Ids: each tab resumes in its recorded folder with its start mode; untrusted is refused; bypass is never replayed' {
+        $r = Invoke-Stubbed 'restore-open.ps1' '{"Ids":"1,2"}'   # one string, the way pwsh -File delivers it
+        $u = Invoke-Stubbed 'restore-open.ps1' "{`"Ids`":[`"$lostB`"],`"AllowUntrusted`":true}"
+        (Same $r.Json.code 'RESTORED') -and (Same $r.Json.opened 1) -and
+        (Same @($r.Json.results.code) @('UNTRUSTED_WORKSPACE', 'RESUMED')) -and (Same $r.Json.results[0].droppedPermissionMode 'bypassPermissions') -and
+        (Same $r.Json.results[1].permissionMode 'plan') -and (Same $r.Tabs.Count 1) -and (Same $r.Tabs[0].dir $restoreDir) -and
+        (Same @($r.Tabs[0].argv) @('--permission-mode', 'plan', '--resume', $lostA)) -and
+        (Same $u.Json.results[0].code 'RESUMED_UNTRUSTED') -and (Same @($u.Tabs[0].argv) @('--resume', $lostB)) -and (Same $u.Json.results[0].droppedPermissionMode 'bypassPermissions')
+    }
+    Check 'restore-open: nothing left to reopen says so' {
+        $empty = Join-Path $sandbox 'kit-empty'
+        try { $env:CLAUDE_SESSION_KIT_HOME = $empty; $r = Invoke-Restore @('-All') } finally { $env:CLAUDE_SESSION_KIT_HOME = $kitHome }
+        (Same $r.ExitCode 0) -and (Same $r.Json.code 'NOTHING_TO_RESTORE')
+    }
+    Check 'resume-session: replays the mode the session was started with' {
+        $r = Invoke-Stubbed 'resume-session.ps1' "{`"SessionId`":`"$lostA`"}"
+        (Same $r.Json.code 'RESUMED') -and (Same $r.Json.permissionMode 'plan') -and (Same @($r.Tabs[0].argv) @('--permission-mode', 'plan', '--resume', $lostA))
+    }
+    Check 'list-sessions: each row says whether that session is open right now' {
+        try { $env:CLAUDE_CODE_BIN = $agentsOk; $r = Invoke-Script 'list-sessions.ps1' @('-Alias', 'good') } finally { $env:CLAUDE_CODE_BIN = $null }
+        (Same (@($r.Json.sessions | Where-Object sessionId -eq $newer)[0].running) $true) -and (Same (@($r.Json.sessions | Where-Object sessionId -eq $old)[0].running) $false)
+    }
+    Check 'hooks.json: SessionStart and SessionEnd run track-session.ps1 directly, no shell; SessionEnd is not async' {
+        $h = Get-Content -LiteralPath (Join-Path $repo 'hooks\hooks.json') -Raw | ConvertFrom-Json
+        $target = '${CLAUDE_PLUGIN_ROOT}/skills/session/scripts/track-session.ps1'
+        $each = foreach ($ev in 'SessionStart', 'SessionEnd') {
+            $hs = @($h.hooks.$ev | ForEach-Object { $_.hooks })
+            if ($hs.Count -ne 1 -or $hs[0].type -ne 'command' -or $hs[0].command -ne 'pwsh' -or @($hs[0].args)[-1] -cne $target) { throw "$ev is not the track-session hook" }
+            $hs[0]
+        }
+        (Test-Path (Join-Path $repo ($target -replace '^\$\{CLAUDE_PLUGIN_ROOT\}/', ''))) -and ('-NoProfile' -in $each[0].args) -and -not $each[1].PSObject.Properties['async']
     }
 
     Write-Host "`nLaunch environment (a stand-in wt records what the tab would get; nothing is launched)"
