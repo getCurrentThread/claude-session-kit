@@ -47,7 +47,8 @@ try {
             if (-not (Test-Path -LiteralPath $f)) { continue }
             try {
                 $s = Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json
-                $summary = [ordered]@{ file = $f; workdir = [string]$s.workdir; sessionId = [string]$s.session_id; promptLength = ([string]$s.prompt).Length; createdAt = [string]$s.created_at }
+                $others = @($s.others | Where-Object { $_ } | ForEach-Object { [ordered]@{ sessionId = [string]$_.session_id; workdir = [string]$_.workdir } })
+                $summary = [ordered]@{ others = $others; othersCount = $others.Count; file = $f; workdir = [string]$s.workdir; sessionId = [string]$s.session_id; promptLength = ([string]$s.prompt).Length; createdAt = [string]$s.created_at }
             } catch { $summary = [ordered]@{ file = $f; unreadable = $true } }
             break
         }

@@ -162,7 +162,62 @@ Write-Log "session : $sessionDesc"
 Write-Log "claude  : $claude"
 Write-Log "prompt  : $($prompt.Length) chars, delivered by $delivery"
 
+# Use the same Win32 quoting on every host; wt also treats semicolons as separators.
+function ConvertTo-NativeArgument([string]$Value) {
+    $escaped = $Value -replace '(\\*)"', '$1$1\"'
+    return '"' + ($escaped -replace '(\\+)\z', '$1$1') + '"'
+}
+function Open-OtherSessions {
+    $wt = $null
+    # Narrow executable override for hermetic resume tests, like CLAUDE_CODE_BIN.
+    if ($env:CLAUDE_SESSION_KIT_WT_BIN) {
+        if (Test-Path -LiteralPath $env:CLAUDE_SESSION_KIT_WT_BIN -PathType Leaf) { $wt = $env:CLAUDE_SESSION_KIT_WT_BIN }
+    } else {
+        $alias = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\wt.exe'
+        if (Test-Path -LiteralPath $alias -PathType Leaf) { $wt = $alias }
+        else {
+            $cmd = Get-Command wt.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($cmd) { $wt = $cmd.Source }
+        }
+    }
+    $seen = @{}; $count = 0
+    foreach ($other in @($state.others)) {
+        if (-not $other) { continue }
+        $id = [string]$other.session_id; $dir = [string]$other.workdir
+        if ($id -notmatch $uuid -or $id -ieq $sessionId -or $seen.ContainsKey($id) -or $count -ge 8 -or $dir -notmatch '\A[A-Za-z]:[\\/]') {
+            Write-Log 'Skipping invalid other session target.'; continue
+        }
+        $seen[$id] = $true; $count++
+        $exists = $false
+        foreach ($attempt in 1..10) {
+            if (Test-Path -LiteralPath $dir -PathType Container) { $exists = $true; break }
+            if ($DryRun) { break }
+            Start-Sleep -Seconds 3
+        }
+        if (-not $exists) { Write-Log "Skipping session $id : saved workdir '$dir' not found."; continue }
+        $launcher = if ($wt) { 'wt tab' } else { 'console' }
+        Write-Log "Other session $id : $launcher in $dir (no prompt)."
+        if ($DryRun) { continue }
+        try {
+            if ($wt) {
+                $args = @('-w', '0', 'nt', '-d', ($dir -replace ';', '\;'), '--', ($claude -replace ';', '\;'), '--resume', $id)
+                $psi = New-Object System.Diagnostics.ProcessStartInfo
+                $psi.FileName = $wt
+                $psi.Arguments = (@($args | ForEach-Object { ConvertTo-NativeArgument $_ }) -join ' ')
+                $psi.UseShellExecute = $false
+                $psi.WorkingDirectory = $dir
+                $proc = [System.Diagnostics.Process]::Start($psi)
+                $proc.WaitForExit()
+                $proc.Dispose()
+            } else {
+                Start-Process -FilePath $claude -ArgumentList @('--resume', $id) -WorkingDirectory $dir
+            }
+        } catch { Write-Log "Could not reopen other session $id : $($_.Exception.Message)" }
+    }
+}
+
 if ($DryRun) {
+    Open-OtherSessions
     Write-Log 'DryRun: not launching. State file left in place.'
     exit 0
 }
@@ -173,6 +228,8 @@ if ($delivery -eq 'file') {
 
 # Archive the state FIRST, so a relaunch that crashes can never loop.
 Move-Item -LiteralPath $stateFile -Destination (Join-Path (Split-Path -Parent $stateFile) 'state.last.json') -Force
+
+Open-OtherSessions
 
 Start-Sleep -Seconds 3
 if ($ownCommandLine) {

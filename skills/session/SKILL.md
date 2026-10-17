@@ -189,11 +189,22 @@ changes nothing. Only `reboot-commit.ps1 -Token` freezes a copy of the resume sc
    the machine off. **A §1 or §2 request ("open", "open it again") can never be approval for this
    branch.**
 
-2. **Leave the next-step note.** Write the prompt that becomes the resumed session's first input to
-   `next-prompt.txt` in the state folder (`<home>\.claude\claude-session-kit\next-prompt.txt`) **with
-   the Write tool** (guarantees UTF-8). Give Write the expanded absolute path, not a variable. It must
-   say: why the machine was restarted / what is done so far / what to do right after the restart,
-   including a verification command (for example: first check the install with `wsl --status`).
+2. **Leave a structured handoff note.** Write the prompt that becomes the resumed session's first
+   input to `next-prompt.txt` in the state folder (`<home>\.claude\claude-session-kit\next-prompt.txt`)
+   **with the Write tool** (guarantees UTF-8). Give Write the expanded absolute path, not a variable.
+   Fill every heading in this template with concrete details; write "None" when nothing failed:
+   ```
+   Why the machine restarted
+   <the change that required a restart>
+   Done so far
+   <completed work and its evidence>
+   Tried and failed
+   <failed attempts and what they showed, or None>
+   Next steps
+   <the remaining work in order>
+   Verify first
+   <the command to run first, for example wsl --status, and the expected result>
+   ```
 
 3. **Session id** (if you can): in your own scratchpad path `…\Temp\claude\<project>\<UUID>\scratchpad`
    the `<UUID>` is the current session id. If you cannot get it, leave `-SessionId` out — the script
@@ -214,6 +225,15 @@ changes nothing. Only `reboot-commit.ps1 -Token` freezes a copy of the resume sc
      check `sessionId` against your own, and confirm with the user if you cannot.
    - `promptDelivery`: `file` means `claude` is an npm-style `.cmd` shim here, so after logon the
      prompt is handed over in `resume-prompt.txt` instead of on the command line. Nothing to do.
+   - `alsoResume` lists the other open interactive sessions that will return (at most eight).
+     Tell the user their titles/ids and folders, and that they reopen **without a prompt**; only
+     the primary receives the handoff. `skipped` lists excluded sessions and reasons, including
+     any cut by the cap. Other folders must already be trusted; `-AllowUntrusted` never bypasses
+     their checks. Add `-OnlyThis` when only the primary should return.
+   - `RESUME_PENDING` (`ok=false`) means `state.json` already holds a registered resume; report
+     its `sessionId`, `workdir` and `createdAt`. Use `-Replace` only when replacing it is intended.
+   - `PROMPT_STALE` (`ok=false`) means the prompt file is over 30 minutes old. Rewrite the handoff;
+     `-AllowStalePrompt` explicitly permits reusing it.
 
    If the user wants to restart by hand, add `-NoReboot` (registers only).
 
@@ -245,8 +265,9 @@ Notes:
 - **Scheduled and SDK sessions are never resume targets.** They pile up in the same project folder and
   are often the newest, but only interactive transcripts are candidates — plus this session's own
   just-started transcript (a "sidecar"), and only while it is under ten minutes old.
-- If the saved folder is missing at logon (a drive that is not connected yet), nothing is launched and
+- If the primary saved folder is missing at logon (a drive that is not connected yet), nothing is launched and
   the state is kept; the terminal says how to run the resume again.
+  A missing folder for another session skips that session and logs it; the remaining sessions still open.
 - If something goes wrong, the log is `<home>\.claude\claude-session-kit\kit.log` (the prompt body is
   never written to it).
 
@@ -256,6 +277,9 @@ Notes:
 pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/reboot-cancel.ps1"          # abort the scheduled restart + remove RunOnce and state
 pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/reboot-cancel.ps1" -Status  # inspect only
 ```
+
+`-Status` includes `state.othersCount` and `state.others` (session ids and working directories),
+so report which other sessions are pending too. It never prints the handoff prompt.
 
 This script **cannot start** a restart. For a "cancel" or "check" request, never run the §3 scripts.
 On `NOTHING_PENDING`, say exactly that: nothing was scheduled. On `RUNONCE_NOT_REMOVED`, the resume

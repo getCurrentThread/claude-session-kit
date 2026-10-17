@@ -357,6 +357,7 @@ Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'claude.exe' -ClaudeArgs 
     }
 
     Write-Host "`nReboot path (sandbox; -Simulate only)"
+    $env:CLAUDE_CODE_BIN = $agentsBad
     $promptFile = Join-Path $sandbox 'prompt.txt'
     [IO.File]::WriteAllText($promptFile, "재부팅 후 이어서: SECRET-MARKER-123`nnext step")
     Check 'reboot-plan: untrusted folder is refused' { Same (Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $declined)).Json.code 'UNTRUSTED_WORKSPACE' }
@@ -392,7 +393,46 @@ Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'claude.exe' -ClaudeArgs 
         $r = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-PromptFile', $empty)
         (Same $r.Json.code 'REBOOT_PLANNED') -and ($r.Json.prompt -ne 'empty')
     }
-    $plan = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-PromptFile', $promptFile, '-DelaySeconds', '5')
+    # The reported cwd is deliberately wrong: only the transcript's recorded cwd counts.
+    $otherDir = New-Item -ItemType Directory -Force -Path (Join-Path $work 'trusted-parent\other ; folder') | ForEach-Object FullName
+    $second = New-Transcript -Cwd $otherDir -Entrypoint 'cli' -When (Get-Date) -Title 'second work'
+    $untrusted = New-Transcript -Cwd $declined -Entrypoint 'cli' -When (Get-Date)
+    $background = [guid]::NewGuid().ToString()
+    $missingTranscript = [guid]::NewGuid().ToString()
+    $missingCwd = New-Transcript -Cwd (Join-Path $work 'vanished') -Entrypoint 'cli' -When (Get-Date)
+    $multiAgents = Join-Path $agentsDir 'multi.cmd'
+    $rows = @(
+        @{ sessionId = $newer; kind = 'interactive' },
+        @{ sessionId = $second; kind = 'interactive'; cwd = $declined },
+        @{ sessionId = $second; kind = 'interactive' },
+        @{ sessionId = $untrusted; kind = 'interactive' },
+        @{ sessionId = $cron; kind = 'interactive' },
+        @{ sessionId = $background; kind = 'background' },
+        @{ sessionId = $missingTranscript; kind = 'interactive' },
+        @{ sessionId = $missingCwd; kind = 'interactive' }
+    )
+    function Set-AgentRows($Rows) { [IO.File]::WriteAllText($multiAgents, "@echo off`r`necho $($Rows | ConvertTo-Json -Compress)`r`n") }
+    Set-AgentRows $rows
+    try {
+        $env:CLAUDE_CODE_BIN = $multiAgents
+        Check 'reboot-plan: only trusted interactive open sessions return, deduplicated and in recorded folders' {
+            $r = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-SessionId', $newer, '-AllowUntrusted')
+            (Same @($r.Json.alsoResume.sessionId) @($second)) -and (Same $r.Json.alsoResume[0].workdir $otherDir) -and
+            (Same $r.Json.alsoResume[0].title 'second work') -and (Same @($r.Json.skipped.sessionId) @($untrusted, $cron, $background, $missingTranscript, $missingCwd))
+        }
+        Check 'reboot-plan -OnlyThis: no other sessions are planned' {
+            $r = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-OnlyThis')
+            (Same @($r.Json.alsoResume) @()) -and (Same @($r.Json.skipped) @())
+        }
+        Check 'reboot-plan: caps other sessions at eight and reports every cut' {
+            $many = @(1..9 | ForEach-Object { @{ sessionId = (New-Transcript -Cwd $otherDir -Entrypoint 'cli' -When (Get-Date)); kind = 'interactive' } })
+            Set-AgentRows $many
+            $r = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain)
+            Set-AgentRows $rows
+            (Same $r.Json.alsoResume.Count 8) -and (Same $r.Json.skipped[0].reason 'LIMIT_REACHED') -and (Same $r.Json.skipped[0].sessionId $many[8].sessionId)
+        }
+        $plan = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-PromptFile', $promptFile, '-DelaySeconds', '5')
+    } finally { $env:CLAUDE_CODE_BIN = $agentsBad }
     Check 'reboot-plan: delay is floored at 30s and the prompt is not echoed' { (Same $plan.Json.delaySeconds 30) -and ($plan.Text -notmatch 'SECRET-MARKER') }
     Check 'reboot-plan: RunOnce targets the frozen copy under the kit home, within 260 chars' {
         ($plan.Json.runOnce.Contains((Join-Path $kitHome 'runtime\resume.ps1'))) -and ($plan.Json.runOnce.Length -le 260) -and ($plan.Json.runOnce -notmatch [regex]::Escape($repo))
@@ -423,6 +463,26 @@ Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'claude.exe' -ClaudeArgs 
         $r = Invoke-Script 'reboot-commit.ps1' @('-Token', $plan.Json.token, '-Simulate')
         [IO.File]::WriteAllText((Get-KitPath plan), $fresh)
         return $r
+    }
+    foreach ($shape in @('non-array', 'non-UUID', 'missing-dir', 'UNC', 'relative', 'duplicate', 'primary', 'over-cap')) {
+        Check "reboot-commit: forged others ($shape) is PLAN_INVALID without state" {
+            $r = Invoke-ForgedCommit {
+                param($p)
+                $valid = [pscustomobject]@{ session_id = $second; workdir = $otherDir }
+                $p.others = @($valid)
+                switch ($shape) {
+                    'non-array' { $p.others = $valid }
+                    'non-UUID' { $valid.session_id = 'not-a-uuid' }
+                    'missing-dir' { $valid.workdir = Join-Path $work 'absent' }
+                    'UNC' { $valid.workdir = '\\localhost\C$\Windows' }
+                    'relative' { $valid.workdir = '.' }
+                    'duplicate' { $p.others = @($valid, $valid) }
+                    'primary' { $valid.session_id = $p.session_id }
+                    'over-cap' { $p.others = @(1..9 | ForEach-Object { [pscustomobject]@{ session_id = [guid]::NewGuid().ToString(); workdir = $plain } }) }
+                }
+            }
+            (Same $r.Json.code 'PLAN_INVALID') -and -not (Test-Path (Get-KitPath state))
+        }
     }
     $frozenPath = Join-Path $kitHome 'runtime\resume.ps1'
     Check 'reboot-commit: a RunOnce that is not the rendered shape is refused -- another program, a prefix, extra arguments' {
@@ -458,14 +518,36 @@ Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'claude.exe' -ClaudeArgs 
         $r = Invoke-Script 'reboot-commit.ps1' @('-Token', $plan.Json.token, '-Simulate')
         $state = Get-Content (Get-KitPath state) -Raw | ConvertFrom-Json
         $frozen = Join-Path (Get-KitPath runtime) 'resume.ps1'
-        (Same $r.Json.code 'SIMULATED') -and (Same $state.session_id $newer) -and (Same $state.workdir $plain) -and ($state.prompt -match 'SECRET-MARKER') -and
+        (Same $r.Json.code 'SIMULATED') -and (Same $state.session_id $newer) -and (Same $state.workdir $plain) -and (Same $state.others[0].session_id $second) -and (Same $state.others[0].workdir $otherDir) -and ($state.prompt -match 'SECRET-MARKER') -and
         ((Get-FileHash $frozen).Hash -eq (Get-FileHash (Join-Path $scripts 'resume-after-reboot.ps1')).Hash) -and
         -not (Test-Path (Get-KitPath plan)) -and ((Get-RealRunOnce) -eq $runOnceBefore)
+    }
+    Check 'reboot-plan: pending resume is refused with metadata; -Replace preserves state while planning' {
+        $before = Get-Content (Get-KitPath state) -Raw
+        $r = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain)
+        $replace = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-Replace')
+        Remove-Item -LiteralPath (Get-KitPath plan)
+        (Same $r.Json.code 'RESUME_PENDING') -and (Same $r.Json.ok $false) -and (Same $r.Json.sessionId $newer) -and
+        (Same $r.Json.workdir $plain) -and $r.Json.createdAt -and (Same $replace.Json.code 'REBOOT_PLANNED') -and (Same (Get-Content (Get-KitPath state) -Raw) $before)
+    }
+    Check 'reboot-plan: stale handoff is refused; -AllowStalePrompt overrides explicitly' {
+        (Get-Item $promptFile).LastWriteTime = (Get-Date).AddMinutes(-31)
+        try {
+            $r = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-PromptFile', $promptFile, '-Replace')
+            $override = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-PromptFile', $promptFile, '-Replace', '-AllowStalePrompt')
+            Remove-Item -LiteralPath (Get-KitPath plan)
+        } finally { (Get-Item $promptFile).LastWriteTime = Get-Date }
+        (Same $r.Json.code 'PROMPT_STALE') -and (Same $r.Json.ok $false) -and (Same $override.Json.code 'REBOOT_PLANNED')
+    }
+    Check 'reboot-cancel -Status: other session ids and folders, without the handoff' {
+        $r = Invoke-Script 'reboot-cancel.ps1' @('-Status')
+        (Same $r.Json.state.othersCount 1) -and (Same $r.Json.state.others[0].sessionId $second) -and
+        (Same $r.Json.state.others[0].workdir $otherDir) -and ($r.Text -notmatch 'SECRET-MARKER')
     }
     Check 'reboot-commit: a kit home spelled with ".." plans and commits like the canonical one' {
         try {
             $env:CLAUDE_SESSION_KIT_HOME = Join-Path $kitHome '..\kit'
-            $p = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-PromptFile', $promptFile)
+            $p = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-PromptFile', $promptFile, '-Replace')
             $c = Invoke-Script 'reboot-commit.ps1' @('-Token', $p.Json.token, '-Simulate')
         } finally { $env:CLAUDE_SESSION_KIT_HOME = $kitHome }
         (Same $p.Json.code 'REBOOT_PLANNED') -and (Same $c.Json.code 'SIMULATED') -and (Same $c.Json.runOnce $p.Json.runOnce) -and ($c.Json.runOnce -notmatch '\.\.')
@@ -490,8 +572,8 @@ Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'claude.exe' -ClaudeArgs 
     # --- the resume script, run for real against stand-ins for `claude` -----------------
     $frozen = Join-Path (Get-KitPath runtime) 'resume.ps1'
     $ps51 = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    function Set-ResumeState([string]$WorkDir, [string]$PromptText) {
-        $s = [ordered]@{ session_id = $newer; workdir = $WorkDir; prompt = $PromptText; created_at = (Get-Date).ToString('o') }
+    function Set-ResumeState([string]$WorkDir, [string]$PromptText, [array]$Others = @()) {
+        $s = [ordered]@{ session_id = $newer; workdir = $WorkDir; prompt = $PromptText; others = $Others; created_at = (Get-Date).ToString('o') }
         [IO.File]::WriteAllText((Get-KitPath state), ($s | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
     }
     function Invoke-Resume([string]$HostExe, [string]$ClaudeBin, [string[]]$Extra = @()) {
@@ -521,16 +603,90 @@ Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'claude.exe' -ClaudeArgs 
         ($handed -ceq $nasty) -and -not (Test-Path (Get-KitPath state)) -and (Test-Path (Get-KitPath stateLast)) -and ($r.Text -notmatch 'pwned')
     }
     # A real executable that records its argv: built with the C# compiler that ships with Windows PowerShell 5.1.
-    $echoExe = Join-Path $sandbox 'echoargs\claude.exe'
+    $echoExe = Join-Path $sandbox 'echo args ; bin\claude.exe'
     if (Test-Path $ps51) {
         New-Item -ItemType Directory -Force -Path (Split-Path $echoExe) | Out-Null
-        $src = 'using System; using System.IO; using System.Text; public static class P { public static int Main(string[] a) { var sb = new StringBuilder(); foreach (var s in a) sb.AppendLine(Convert.ToBase64String(Encoding.UTF8.GetBytes(s))); File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "argv.txt"), sb.ToString()); return 0; } }'
+        $src = 'using System; using System.IO; using System.Text; public static class P { public static int Main(string[] a) { var sb = new StringBuilder(); foreach (var s in a) sb.AppendLine(Convert.ToBase64String(Encoding.UTF8.GetBytes(s))); File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "argv.txt"), sb.ToString()); File.WriteAllText(Path.Combine(Environment.CurrentDirectory, "session-argv.txt"), sb.ToString()); return 0; } }'
         $srcFile = Join-Path (Split-Path $echoExe) 'echoargs.cs'
         [IO.File]::WriteAllText($srcFile, $src)
         try { & $ps51 -NoProfile -NonInteractive -Command "Add-Type -Path '$srcFile' -OutputAssembly '$echoExe' -OutputType ConsoleApplication" 2>&1 | Out-Null } catch {}
     }
     if (Test-Path $echoExe) {
         function Get-EchoedArgs { @(Get-Content (Join-Path (Split-Path $echoExe) 'argv.txt') | Where-Object { $_ } | ForEach-Object { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($_)) }) }
+        $wtStub = Join-Path $sandbox 'wt-recorder.exe'
+        $wtSource = Join-Path $sandbox 'wt-recorder.cs'
+        # The stand-in emulates only wt's known nt arguments and starts the recording claude.
+        [IO.File]::WriteAllText($wtSource, @'
+using System;
+using System.IO;
+using System.Text;
+using System.Diagnostics;
+public static class W {
+    public static int Main(string[] a) {
+        string root = Environment.GetEnvironmentVariable("CLAUDE_SESSION_KIT_HOME");
+        var sb = new StringBuilder();
+        foreach (string s in a) sb.AppendLine(Convert.ToBase64String(Encoding.UTF8.GetBytes(s)));
+        File.AppendAllText(Path.Combine(root, "wt-argv.txt"), sb.ToString());
+        File.AppendAllText(Path.Combine(root, "archive-check.txt"), File.Exists(Path.Combine(root, "state.json")) ? "pending" : "archived");
+        if (a.Length != 9 || a[0] != "-w" || a[1] != "0" || a[2] != "nt" || a[3] != "-d" || a[5] != "--" || a[7] != "--resume") return 9;
+        var p = new ProcessStartInfo(a[6].Replace("\\;", ";"), "--resume " + a[8]);
+        p.WorkingDirectory = a[4].Replace("\\;", ";"); p.UseShellExecute = false;
+        using (var proc = Process.Start(p)) { proc.WaitForExit(); return proc.ExitCode; }
+    }
+}
+'@)
+        & $ps51 -NoProfile -NonInteractive -Command "Add-Type -Path '$wtSource' -OutputAssembly '$wtStub' -OutputType ConsoleApplication" 2>&1 | Out-Null
+        $thirdDir = New-Item -ItemType Directory -Force -Path (Join-Path $work 'trusted-parent\third folder') | ForEach-Object FullName
+        $third = [guid]::NewGuid().ToString()
+        $targets = @(@{ session_id = $second; workdir = $otherDir }, @{ session_id = $third; workdir = $thirdDir })
+        function Read-ArgFile([string]$File) { @(Get-Content -LiteralPath $File | Where-Object { $_ } | ForEach-Object { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($_)) }) }
+        foreach ($resumeHost in @('pwsh', $ps51)) {
+            Check "resume: extra wt tabs round trip without prompts and primary stays intact ($resumeHost)" {
+                Set-ResumeState $plain $nasty $targets
+                $wtLog = Join-Path $kitHome 'wt-argv.txt'; $archiveLog = Join-Path $kitHome 'archive-check.txt'
+                Remove-Item -LiteralPath $wtLog, $archiveLog -ErrorAction SilentlyContinue
+                try {
+                    $env:CLAUDE_SESSION_KIT_WT_BIN = $wtStub
+                    $r = Invoke-Resume $resumeHost $echoExe
+                } finally { $env:CLAUDE_SESSION_KIT_WT_BIN = $null }
+                $a = Read-ArgFile (Join-Path $otherDir 'session-argv.txt'); $b = Read-ArgFile (Join-Path $thirdDir 'session-argv.txt')
+                $primary = Get-EchoedArgs; $wtArgs = Read-ArgFile $wtLog
+                (Same $a @('--resume', $second)) -and (Same $b @('--resume', $third)) -and
+                (Same $primary @('--resume', $newer, '--', $nasty)) -and (Same $wtArgs.Count 18) -and
+                (Same $wtArgs[4] ($otherDir -replace ';', '\;')) -and (Same (Get-Content $archiveLog -Raw) 'archivedarchived') -and
+                -not (Test-Path (Get-KitPath state)) -and ($r.Text -notmatch 'SECRET-MARKER|pwned')
+            }
+        }
+        Check 'resume -DryRun: logs extra targets, skips missing folders, launches nothing and retains state' {
+            $missingId = [guid]::NewGuid().ToString()
+            Set-ResumeState $plain $nasty @($targets[0], @{ session_id = $missingId; workdir = (Join-Path $work 'missing-other') })
+            $wtLog = Join-Path $kitHome 'wt-argv.txt'; Remove-Item -LiteralPath $wtLog -ErrorAction SilentlyContinue
+            try { $env:CLAUDE_SESSION_KIT_WT_BIN = $wtStub; $r = Invoke-Resume 'pwsh' $echoExe @('-DryRun') }
+            finally { $env:CLAUDE_SESSION_KIT_WT_BIN = $null }
+            ($r.Text -match [regex]::Escape($second)) -and ($r.Text -match "Skipping session $missingId") -and
+            -not (Test-Path $wtLog) -and (Test-Path (Get-KitPath state)) -and ($r.Text -notmatch 'pwned')
+        }
+        Check 'resume: a vanished other folder is skipped after waiting; remaining tabs and primary still open' {
+            $missingId = [guid]::NewGuid().ToString()
+            Set-ResumeState $plain $nasty @(@{ session_id = $missingId; workdir = (Join-Path $work 'missing-other') }, $targets[0])
+            $wtLog = Join-Path $kitHome 'wt-argv.txt'; Remove-Item -LiteralPath $wtLog -ErrorAction SilentlyContinue
+            try { $env:CLAUDE_SESSION_KIT_WT_BIN = $wtStub; $r = Invoke-Resume 'pwsh' $echoExe }
+            finally { $env:CLAUDE_SESSION_KIT_WT_BIN = $null }
+            ($r.Text -match "Skipping session $missingId") -and (Same (Read-ArgFile $wtLog).Count 9) -and
+            (Same (Read-ArgFile (Join-Path $otherDir 'session-argv.txt')) @('--resume', $second)) -and
+            (Same (Get-EchoedArgs) @('--resume', $newer, '--', $nasty)) -and -not (Test-Path (Get-KitPath state))
+        }
+        foreach ($resumeHost in @('pwsh', $ps51)) {
+            Check "resume: no wt opens an extra console in its recorded folder ($resumeHost)" {
+                $record = Join-Path $otherDir 'session-argv.txt'; Remove-Item -LiteralPath $record -ErrorAction SilentlyContinue
+                Set-ResumeState $plain $nasty @($targets[0])
+                try {
+                    $env:CLAUDE_SESSION_KIT_WT_BIN = Join-Path $sandbox 'absent-wt.exe'
+                    Invoke-Resume $resumeHost $echoExe | Out-Null
+                } finally { $env:CLAUDE_SESSION_KIT_WT_BIN = $null }
+                (Same (Read-ArgFile $record) @('--resume', $second)) -and (Same (Get-EchoedArgs) @('--resume', $newer, '--', $nasty))
+            }
+        }
         Check 'resume: to a real .exe the prompt arrives as ONE intact argument (PowerShell 7)' {
             Set-ResumeState $plain $nasty
             Invoke-Resume 'pwsh' $echoExe | Out-Null
@@ -586,9 +742,10 @@ Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'claude.exe' -ClaudeArgs 
         $lonely = @('reboot-commit.ps1', 'reboot-cancel.ps1', 'resume-after-reboot.ps1') | ForEach-Object { Code (Get-Item (Join-Path $scripts $_)) }
         ($plan -notmatch 'Core\.Effects|Start-Process|Start-ClaudeTerminal|wt\.exe\s') -and -not ($lonely -match 'lib\\Core\.')
     }
-    Check 'only Core.Effects.ps1 starts a terminal' {
+    # The frozen resume script also opens other sessions after logon, without loading lib/.
+    Check 'only Core.Effects.ps1 and resume-after-reboot.ps1 start a terminal' {
         $hits = @($all | Where-Object { (Code $_) -match 'Start-Process|&\s*\$wt\b' } | ForEach-Object Name)
-        Same $hits @('Core.Effects.ps1')
+        Same @($hits | Sort-Object) @('Core.Effects.ps1', 'resume-after-reboot.ps1')
     }
     Check '`claude --continue` is never emitted' { -not ($all | Where-Object { (Code $_) -match "['""]--continue['""]|['""]-c['""]" }) }
     Check 'nothing writes ~/.claude.json or names hasTrustDialogAccepted outside the read-only check' {
