@@ -59,6 +59,8 @@ function Invoke-SessionLaunch {
         [string]$SessionId,
         [string]$Alias,
         [ValidateSet('new', 'open', 'resume')][string]$Source = 'open',
+        [string]$Name,
+        [string]$PermissionMode,
         [switch]$Fork,
         [switch]$AllowUntrusted
     )
@@ -78,8 +80,21 @@ function Invoke-SessionLaunch {
         return [ordered]@{ ok = $false; code = 'CLAUDE_NOT_FOUND'; message = 'The claude executable was not found on PATH or in the usual install locations.' }
     }
 
+    # Two tabs on one conversation interleave their writes into the same transcript.
+    # A fork is a new conversation, and a picker chooses in the tab, so neither is refused.
+    if ($Mode -eq 'resume' -and -not $Fork) {
+        $running = @(Get-RunningSessions) | Where-Object { $_.SessionId -eq $SessionId } | Select-Object -First 1
+        if ($running) {
+            return [ordered]@{
+                ok = $false; code = 'ALREADY_RUNNING'; sessionId = $SessionId; path = $WorkDir
+                pid = $running.Pid; kind = $running.Kind; name = $running.Name
+                message = 'That session is already open in another terminal. Nothing was opened; switch to that tab, or resume with -Fork to work on a copy.'
+            }
+        }
+    }
+
     if ($Mode -eq 'new' -and -not $SessionId) { $SessionId = [guid]::NewGuid().ToString() }
-    $claudeArgs = Get-ClaudeArgs -Mode $Mode -SessionId $SessionId -Fork:$Fork
+    $claudeArgs = Get-ClaudeArgs -Mode $Mode -SessionId $SessionId -Name $Name -PermissionMode $PermissionMode -Fork:$Fork
 
     $launcher = Start-ClaudeTerminal -WorkDir $WorkDir -ClaudeExe $claude -ClaudeArgs $claudeArgs
 

@@ -386,6 +386,60 @@ function Get-ClaudeSessions {
     return ($out.ToArray() | Sort-Object LastWrite -Descending)
 }
 
+# --- running sessions (READ ONLY) ------------------------------------------------------------
+# Which conversations are open right now. `claude agents --json` is the documented
+# answer (Claude Code 2.1.139+) and the only process this file starts: a read-only
+# query with fixed arguments. When it is missing or fails, the CLI's own per-process
+# records (<claude home>\sessions\<pid>.json) are read instead, and one counts only
+# while that PID is alive AND was started at the recorded time -- Windows reuses
+# PIDs, so a live PID alone may be anybody's process.
+# Rows: SessionId, Pid, Kind (interactive | background | ...), Cwd, Name, Status, Source.
+function Get-RunningSessions {
+    $rows = $null
+    $claude = Resolve-ClaudeBinary
+    if ($claude) {
+        try {
+            $psi = [Diagnostics.ProcessStartInfo]::new($claude)
+            $psi.ArgumentList.Add('agents'); $psi.ArgumentList.Add('--json')
+            $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+            $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+            $psi.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
+            $p = [Diagnostics.Process]::Start($psi)
+            $out = $p.StandardOutput.ReadToEndAsync(); $null = $p.StandardError.ReadToEndAsync()
+            if ($p.WaitForExit(10000) -and $p.ExitCode -eq 0) {
+                $rows = @(foreach ($r in @($out.Result | ConvertFrom-Json -AsHashtable)) {
+                        if (-not $r -or -not (Test-SessionIdFormat ([string]$r['sessionId']))) { continue }
+                        [pscustomobject]@{
+                            SessionId = [string]$r['sessionId']; Pid = $r['pid']; Kind = [string]$r['kind']; Cwd = [string]$r['cwd']
+                            Name = [string]$r['name']; Status = [string]$(if ($r['status']) { $r['status'] } else { $r['state'] }); Source = 'agents'
+                        }
+                    })
+            } else {
+                try { $p.Kill() } catch {}
+            }
+        } catch { $rows = $null }
+    }
+    if ($null -ne $rows) { return $rows }
+
+    $dir = Join-Path (Get-ClaudeHome) 'sessions'
+    foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
+        try { $r = Get-Content -LiteralPath $f.FullName -Raw -Encoding UTF8 | ConvertFrom-Json -AsHashtable } catch { continue }
+        if (-not $r -or -not (Test-SessionIdFormat ([string]$r['sessionId'])) -or -not $r['pid']) { continue }
+        $proc = Get-Process -Id ([int]$r['pid']) -ErrorAction SilentlyContinue
+        if (-not $proc) { continue }
+        # procStart is the creation time as a FILETIME. Unreadable (an elevated process)
+        # leaves the PID as the only evidence, and it is taken: a refused duplicate is
+        # cheaper than two tabs writing one transcript.
+        $started = $null
+        try { $started = $proc.StartTime.ToUniversalTime().ToFileTimeUtc() } catch {}
+        if ($r['procStart'] -and $null -ne $started -and $started -ne [long]$r['procStart']) { continue }
+        [pscustomobject]@{
+            SessionId = [string]$r['sessionId']; Pid = [int]$r['pid']; Kind = [string]$r['kind']; Cwd = [string]$r['cwd']
+            Name = [string]$r['name']; Status = [string]$r['status']; Source = 'pidfile'
+        }
+    }
+}
+
 # --- resume target ladder -------------------------------------------------------------------
 #   1. explicit -SessionId       (must exist as a transcript; an id is never guessed)
 #   2. launcher registry         (sessions this kit opened, newest transcript first)

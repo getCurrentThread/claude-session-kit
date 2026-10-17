@@ -98,15 +98,32 @@ function Get-TranscriptHeadInfo {
 # --- claude argv -----------------------------------------------------------------
 # `--continue` cannot be expressed here, on purpose: it reopens whatever
 # conversation is newest in the folder, which may be a scheduled run's.
+#
+# -PermissionMode only REPLAYS a mode a person already chose for that session; the
+# kit never picks one. bypassPermissions is refused even as a replay: reopening a
+# tab must not be the step that turns every permission prompt off.
+$script:ReplayablePermissionModes = @('acceptEdits', 'auto', 'manual', 'dontAsk', 'plan')
+
 function Get-ClaudeArgs {
     param(
         [Parameter(Mandatory)][ValidateSet('new', 'resume', 'picker')][string]$Mode,
         [string]$SessionId,
         [string]$Prompt,
+        [string]$Name,
+        [string]$PermissionMode,
         [switch]$Fork
     )
 
     $argv = [System.Collections.Generic.List[string]]::new()
+    if ($PermissionMode) {
+        if ($PermissionMode -cnotin $script:ReplayablePermissionModes) { throw "Permission mode '$PermissionMode' is never replayed." }
+        $argv.Add('--permission-mode'); $argv.Add($PermissionMode)
+    }
+    if ($Name) {
+        # A line feed would end up in the terminal title and the picker row.
+        if ($Name -match '[\r\n]') { throw 'A session name is one line.' }
+        $argv.Add('--name'); $argv.Add($Name)
+    }
     switch ($Mode) {
         'new' {
             if ($SessionId) {

@@ -107,6 +107,12 @@ try {
         (Same (Get-ClaudeArgs -Mode picker) @('--resume')) -and (Throws { Get-ClaudeArgs -Mode picker -Prompt 'x' })
     }
     Check 'argv: resume refuses anything that is not a session id' { Throws { Get-ClaudeArgs -Mode resume -SessionId 'latest' } }
+    Check 'argv: a name and a replayed permission mode go first; bypassPermissions is never replayed' {
+        (Same (Get-ClaudeArgs -Mode new -SessionId '11111111-1111-1111-1111-111111111111' -Name 'blog refactor' -PermissionMode plan) @('--permission-mode', 'plan', '--name', 'blog refactor', '--session-id', '11111111-1111-1111-1111-111111111111')) -and
+        (Throws { Get-ClaudeArgs -Mode resume -SessionId '11111111-1111-1111-1111-111111111111' -PermissionMode bypassPermissions }) -and
+        (Throws { Get-ClaudeArgs -Mode new -PermissionMode 'Plan' }) -and
+        (Throws { Get-ClaudeArgs -Mode new -Name "two`nlines" })
+    }
     Check 'session id: a trailing line feed is not part of a UUID' {
         (Test-SessionIdFormat '11111111-1111-1111-1111-111111111111') -and -not (Test-SessionIdFormat "11111111-1111-1111-1111-111111111111`n") -and
         (Throws { Get-ClaudeArgs -Mode resume -SessionId "11111111-1111-1111-1111-111111111111`n" })
@@ -234,6 +240,48 @@ try {
         ($null -eq (Resolve-WorkspacePath '\\localhost\C$\Windows')) -and ($null -eq (Resolve-WorkspacePath '//localhost/C$/Windows'))
     }
     Check 'digest never contains the text' { (Get-TextDigest 'secret plan') -notmatch 'secret' }
+
+    Write-Host "`nRunning sessions (stand-in claude; nothing is launched)"
+    $agentsDir = New-Item -ItemType Directory -Force -Path (Join-Path $sandbox 'agents') | ForEach-Object FullName
+    $agentsOk = Join-Path $agentsDir 'claude.cmd'
+    [IO.File]::WriteAllText($agentsOk, "@echo off`r`necho [{`"pid`":4242,`"cwd`":`"C:\\w`",`"kind`":`"interactive`",`"sessionId`":`"$newer`",`"name`":`"n`",`"status`":`"idle`"},{`"kind`":`"background`",`"sessionId`":`"not-a-uuid`"}]`r`n")
+    $agentsBad = Join-Path $agentsDir 'broken.cmd'
+    [IO.File]::WriteAllText($agentsBad, "@echo off`r`nexit /b 1`r`n")
+    Check 'running: `claude agents --json` is read, rows without a session id are dropped' {
+        try { $env:CLAUDE_CODE_BIN = $agentsOk; $r = @(Get-RunningSessions) } finally { $env:CLAUDE_CODE_BIN = $null }
+        (Same $r.Count 1) -and (Same $r[0].SessionId $newer) -and (Same $r[0].Pid 4242) -and (Same $r[0].Source 'agents')
+    }
+    Check 'running: without the CLI, a PID record counts only while that process lives with the recorded start time' {
+        $sessDir = New-Item -ItemType Directory -Force -Path (Join-Path $cfgDir 'sessions') | ForEach-Object FullName
+        $me = Get-Process -Id $PID
+        $start = $me.StartTime.ToUniversalTime().ToFileTimeUtc()
+        $dead = 4; while (Get-Process -Id $dead -ErrorAction SilentlyContinue) { $dead += 4 }
+        $alive = [guid]::NewGuid().ToString(); $reused = [guid]::NewGuid().ToString(); $gone = [guid]::NewGuid().ToString()
+        @{ "$PID.json" = @{ pid = $PID; sessionId = $alive; cwd = $plain; kind = 'interactive'; procStart = "$start" }
+           'reused.json' = @{ pid = $PID; sessionId = $reused; cwd = $plain; kind = 'interactive'; procStart = "$($start + 1)" }
+           "$dead.json" = @{ pid = $dead; sessionId = $gone; cwd = $plain; kind = 'interactive' } }.GetEnumerator() |
+            ForEach-Object { [IO.File]::WriteAllText((Join-Path $sessDir $_.Key), ($_.Value | ConvertTo-Json)) }
+        try { $env:CLAUDE_CODE_BIN = $agentsBad; $r = @(Get-RunningSessions) } finally { $env:CLAUDE_CODE_BIN = $null; Remove-Item -LiteralPath $sessDir -Recurse -Force }
+        (Same @($r.SessionId) @($alive)) -and (Same $r[0].Source 'pidfile')
+    }
+    Check 'launch: a session that is already open is not opened a second time; a fork still is allowed through' {
+        $probe = Join-Path $agentsDir 'probe.ps1'
+        [IO.File]::WriteAllText($probe, @'
+param($Lib, $Dir, $Id)
+. $Lib
+function Start-ClaudeTerminal { 'stub' }
+function Register-LaunchedSession {}
+$dup  = Invoke-SessionLaunch -WorkDir $Dir -Mode resume -SessionId $Id -AllowUntrusted
+$fork = Invoke-SessionLaunch -WorkDir $Dir -Mode resume -SessionId $Id -Fork -AllowUntrusted
+@{ dup = $dup.code; fork = $fork.code } | ConvertTo-Json -Compress
+'@)
+        try {
+            $env:CLAUDE_CODE_BIN = $agentsOk
+            $out = & pwsh -NoProfile -ExecutionPolicy Bypass -File $probe -Lib (Join-Path $scripts 'lib\Core.Effects.ps1') -Dir $plain -Id $newer 2>&1 | Select-Object -Last 1
+        } finally { $env:CLAUDE_CODE_BIN = $null }
+        $o = "$out" | ConvertFrom-Json
+        (Same $o.dup 'ALREADY_RUNNING') -and ($o.fork -like 'RESUMED*')
+    }
 
     Write-Host "`nScripts (sandbox; nothing is launched)"
     $aliasDoc = @{ version = 2; tempTask = @{ root = $declined; prefix = 'scratch' }; aliases = @{
