@@ -336,6 +336,213 @@ $fork = Invoke-SessionLaunch -WorkDir $Dir -Mode resume -SessionId $Id -Fork -Al
         (Same $r.Json.code 'CANDIDATES') -and (Same $row.sessions 3) -and (Same $row.alias 'good')
     }
 
+    Write-Host "`nTitles, search and retention (sandbox)"
+    # Own folders, so nothing here becomes the "newest session" the reboot tests below expect.
+    $titled = New-Item -ItemType Directory -Force -Path (Join-Path $work 'trusted-parent\titled') | ForEach-Object FullName
+    $finds  = New-Item -ItemType Directory -Force -Path (Join-Path $work 'trusted-parent\finds') | ForEach-Object FullName
+    # A transcript from records; user/assistant ones get the entrypoint and cwd a CLI transcript carries.
+    function New-Chat([string]$Cwd, [object[]]$Records, [string]$Entrypoint = 'cli', [string]$SubDir, [string]$Id = [guid]::NewGuid().ToString()) {
+        $dir = Join-Path (Join-Path $cfgDir 'projects') (ConvertTo-ProjectSlug $Cwd)
+        if ($SubDir) { $dir = Join-Path $dir $SubDir }
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        $lines = foreach ($r in $Records) {
+            if ($r['type'] -in 'user', 'assistant') { $r = $r + @{ entrypoint = $Entrypoint; cwd = $Cwd } }
+            ($r + @{ sessionId = $Id }) | ConvertTo-Json -Compress -Depth 6
+        }
+        [IO.File]::WriteAllLines((Join-Path $dir "$Id.jsonl"), [string[]]$lines)
+        return $Id
+    }
+    function Say([string]$Text) { @{ type = 'user'; message = @{ role = 'user'; content = $Text } } }
+    function Reply([string]$Text) { @{ type = 'assistant'; message = @{ role = 'assistant'; content = @(@{ type = 'text'; text = $Text }) } } }
+    function Titled([string]$Kind, [string]$Text) { if ($Kind -eq 'custom') { @{ type = 'custom-title'; customTitle = $Text } } else { @{ type = 'ai-title'; aiTitle = $Text } } }
+    function Json($o) { $o | ConvertTo-Json -Compress -Depth 6 }
+
+    Check 'titles: the last custom-title wins over any ai-title, even a later one' {
+        $t = Get-TranscriptHeadInfo -Lines @((Json (Titled custom 'first name')), (Json (Titled ai 'summary')), (Json (Titled custom 'renamed')), (Json (Titled ai 'later summary')))
+        (Same $t.Title 'renamed') -and (Same $t.TitleSource 'custom')
+    }
+    Check 'titles: then the last ai-title; then the first real prompt (no meta, <command> text, tool output or CLI notice) as one short line' {
+        $meta = '{"type":"user","isMeta":true,"message":{"role":"user","content":"injected caveat"}}'
+        $cmd  = '{"type":"user","message":{"role":"user","content":"<command-name>/model</command-name>"}}'
+        $tool = '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"output"}]}}'
+        $esc  = '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}'
+        $note = '{"type":"user","promptSource":"system","origin":{"kind":"task-notification"},"message":{"role":"user","content":"task done"}}'
+        $sum  = '{"type":"user","isCompactSummary":true,"message":{"role":"user","content":"This session is being continued"}}'
+        $ai   = Get-TranscriptHeadInfo -Lines @((Json (Titled ai 'one')), (Json (Titled ai 'two')))
+        $p    = Get-TranscriptHeadInfo -Lines @($meta, $cmd, $tool, $esc, $note, $sum, '{"type":"user","message":{"role":"user","content":"  fix the\n\n login   bug "}}', (Json (Say 'second prompt')))
+        $long = Get-TranscriptHeadInfo -Lines @((Json (Say ('word ' * 60))))
+        $none = Get-TranscriptHeadInfo -Lines @($meta, $cmd, $tool, $esc, $note, $sum)
+        (Same $ai.Title 'two') -and (Same $ai.TitleSource 'ai') -and (Same $p.Title 'fix the login bug') -and (Same $p.TitleSource 'prompt') -and
+        ($long.Title.Length -le 80) -and $long.Title.EndsWith('...') -and ($null -eq $none.Title) -and ($null -eq $none.TitleSource)
+    }
+    Check 'one line: whitespace collapses, cuts are marked, the window keeps the term, no half surrogate pair' {
+        $smile = [char]::ConvertFromUtf32(0x1F600)
+        $s = ConvertTo-OneLine -Text (('alpha ' * 30) + "needle`n" + ('omega ' * 30)) -Max 120 -Term 'NEEDLE'
+        $end = ConvertTo-OneLine -Text (('x' * 76) + $smile + ('y' * 50)) -Max 80
+        $lead = ConvertTo-OneLine -Text (('a' * 10) + $smile + ('b' * 39) + 'needle' + ('c' * 100)) -Max 120 -Term 'needle'
+        ($s.Length -le 120) -and ($s -match 'needle omega') -and $s.StartsWith('...') -and $s.EndsWith('...') -and
+        (Same $end (('x' * 76) + '...')) -and ($lead -match 'needle') -and ($lead -notmatch '[\uD800-\uDFFF]') -and ($lead.Length -le 120)
+    }
+    Check 'titles: a /rename far past the old 120-line head (and past 64 KB) is found in the tail window' {
+        $recs = @((Titled ai 'early summary'), (Say 'start the work')) + @(1..200 | ForEach-Object { Reply (('filler ' * 90) + $_) }) + @((Titled custom 'renamed late'), (Reply 'after the rename'))
+        $file = Join-Path (Get-ProjectTranscriptDir $titled) ((New-Chat -Cwd $titled -Records $recs) + '.jsonl')
+        $rec = Get-ClaudeSessionRecord -TranscriptPath $file
+        ((Get-Item $file).Length -gt 64KB) -and (Same $rec.Kind 'interactive') -and (Same $rec.Title 'renamed late') -and (Same $rec.TitleSource 'custom')
+    }
+    Check '-Name: reaches the claude argv and the registry; list-sessions shows it until the transcript records a title' {
+        $probe = Join-Path $sandbox 'nameprobe.ps1'
+        [IO.File]::WriteAllText($probe, @'
+param($Lib, $Dir)
+. $Lib
+function Start-ClaudeTerminal { param($WorkDir, $ClaudeExe, $ClaudeArgs) $script:argv = $ClaudeArgs; 'stub' }
+$r = Invoke-SessionLaunch -WorkDir $Dir -Mode new -Source open -Name 'blog refactor' -AllowUntrusted
+@{ sessionId = $r.sessionId; argv = $script:argv } | ConvertTo-Json -Compress
+'@)
+        try {
+            $env:CLAUDE_CODE_BIN = $agentsOk
+            $out = & pwsh -NoProfile -ExecutionPolicy Bypass -File $probe -Lib (Join-Path $scripts 'lib\Core.Effects.ps1') -Dir $titled 2>&1 | Select-Object -Last 1
+        } finally { $env:CLAUDE_CODE_BIN = $null }
+        $o = "$out" | ConvertFrom-Json
+        $script:namedId = $o.sessionId
+        $reg = @(Get-RegisteredSessions | Where-Object SessionId -eq $o.sessionId)
+        New-Chat -Cwd $titled -Records @((Say '<command-name>/clear</command-name>')) -Id $o.sessionId | Out-Null   # written, no title yet
+        $row = @((Invoke-Script 'list-sessions.ps1' @('-Path', $titled)).Json.sessions | Where-Object sessionId -eq $o.sessionId)[0]
+        $wired = @('open-workspace.ps1', 'new-temp-task.ps1' | Where-Object { (Get-Content (Join-Path $scripts $_) -Raw) -match 'Invoke-SessionLaunch[^\r\n]*-Name \$Name' })
+        (Same @($o.argv[0..1]) @('--name', 'blog refactor')) -and (Same $reg.Count 1) -and (Same $reg[0].Name 'blog refactor') -and
+        (Same $row.title 'blog refactor') -and (Same $row.titleSource 'custom') -and (Same $wired.Count 2)
+    }
+    Check 'registry: a row written before names existed still loads' {
+        $legacy = [guid]::NewGuid().ToString()
+        Add-Content -LiteralPath (Get-KitPath registry) -Value (@{ sessionId = $legacy; cwd = $titled; alias = $null; source = 'open'; startedAt = (Get-Date).ToString('o') } | ConvertTo-Json -Compress)
+        $r = @(Get-RegisteredSessions | Where-Object SessionId -eq $legacy)
+        (Same $r.Count 1) -and (Same $r[0].Name '')
+    }
+
+    $sTitle = New-Chat -Cwd $finds -Records @((Titled ai 'deploy pipeline notes'), (Say 'how do we roll back the release'), (Reply 'run the rollback script, then redeploy'))
+    $sBody  = New-Chat -Cwd $finds -Records @((Titled ai 'stage incident'), (Say 'the deploy failed again on stage'), (Reply ('checked the logs. ' + ('filler text ' * 30) + "the 배포 key expired`nrotate it and retry")),
+        (Say '<bash-stdout>shelltokenzz=1</bash-stdout><bash-stderr></bash-stderr>'))
+    $sAuto  = New-Chat -Cwd $finds -Entrypoint 'sdk-cli' -Records @((Say 'deploy rollback release 배포 expired'), (Reply 'deploy'))
+    $sSub   = New-Chat -Cwd $finds -SubDir 'subagents' -Records @((Say 'deploy rollback release 배포 expired'))
+    # the body-only session is the newer one, so only the title weight can rank the other first
+    (Get-Item (Join-Path (Get-ProjectTranscriptDir $finds) "$sTitle.jsonl")).LastWriteTime = (Get-Date).AddHours(-3)
+    (Get-Item (Join-Path (Get-ProjectTranscriptDir $finds) "$sBody.jsonl")).LastWriteTime = (Get-Date).AddHours(-1)
+
+    Check 'search: every term has to match, case-insensitive; automated and subagent transcripts never come back' {
+        $r = Invoke-Script 'search-sessions.ps1' @('-Query', 'ROLLBACK release', '-Path', $finds)
+        $split = Invoke-Script 'search-sessions.ps1' @('-Query', 'deploy expired', '-Path', $finds)   # OR would also bring back $sTitle
+        (Same $r.ExitCode 0) -and (Same $r.Json.code 'SEARCH_RESULTS') -and (Same @($r.Json.sessions.sessionId) @($sTitle)) -and (Same $r.Json.total 1) -and
+        (Same @($split.Json.sessions.sessionId) @($sBody))
+    }
+    Check 'search: the asking session (CLAUDE_CODE_SESSION_ID) is left out, and command output is not message text' {
+        try { $env:CLAUDE_CODE_SESSION_ID = $sTitle; $r = Invoke-Script 'search-sessions.ps1' @('-Query', 'deploy', '-Path', $finds) } finally { $env:CLAUDE_CODE_SESSION_ID = $null }
+        $shell = Invoke-Script 'search-sessions.ps1' @('-Query', 'shelltokenzz', '-Path', $finds)
+        (Same @($r.Json.sessions.sessionId) @($sBody)) -and (Same $shell.Json.code 'SEARCH_RESULTS') -and (Same $shell.Json.total 0)
+    }
+    Check 'search: a Hangul term matches message text' {
+        $r = Invoke-Script 'search-sessions.ps1' @('-Query', '배포', '-Path', $finds)
+        (Same @($r.Json.sessions.sessionId) @($sBody)) -and (Same @($r.Json.sessions[0].matchedIn) @('body'))
+    }
+    Check 'search: a title hit outranks a newer session that only mentions the term' {
+        $r = Invoke-Script 'search-sessions.ps1' @('-Query', 'deploy', '-Path', $finds)
+        (Same @($r.Json.sessions.sessionId) @($sTitle, $sBody)) -and ($r.Json.sessions[0].score -gt $r.Json.sessions[1].score) -and
+        (Same @($r.Json.sessions[0].matchedIn) @('title', 'body')) -and (Same $r.Json.sessions[0].titleSource 'ai')
+    }
+    Check 'search: the snippet is one line of at most 120 characters around the first message hit' {
+        $r = Invoke-Script 'search-sessions.ps1' @('-Query', 'expired', '-Path', $finds)
+        $snip = $r.Json.sessions[0].snippet
+        (Same $r.Json.sessions[0].sessionId $sBody) -and ($snip.Length -le 120) -and ($snip -notmatch '[\r\n]') -and ($snip -match 'expired rotate') -and $snip.StartsWith('...')
+    }
+    Check 'search: no match is an empty SEARCH_RESULTS, not an error' {
+        $r = Invoke-Script 'search-sessions.ps1' @('-Query', 'zz-no-such-term-zz')
+        (Same $r.ExitCode 0) -and (Same $r.Json.code 'SEARCH_RESULTS') -and (Same $r.Json.total 0) -and (Same @($r.Json.sessions).Count 0)
+    }
+    # hide rg: drop every PATH entry that holds rg.exe, keep the pwsh that runs the scripts
+    $noRgPath = (@(Split-Path (Get-Process -Id $PID).Path) + @($env:PATH -split ';' | Where-Object { $_ -and -not (Test-Path -LiteralPath (Join-Path $_ 'rg.exe')) })) -join ';'
+    $savedPath = $env:PATH
+    try { $env:PATH = $noRgPath; $rgHidden = -not (Get-Command rg.exe -CommandType Application -ErrorAction SilentlyContinue) } finally { $env:PATH = $savedPath }
+    if (-not (Get-Command rg.exe -CommandType Application -ErrorAction SilentlyContinue)) {
+        Skip 'search: the rg and Select-String prefilters give the same results' 'rg is not on PATH'
+    } elseif (-not $rgHidden) {
+        Skip 'search: the rg and Select-String prefilters give the same results' 'rg.exe sits next to pwsh and cannot be hidden'
+    } else {
+        Check 'search: the rg and Select-String prefilters give the same results' {
+            $queries = @('deploy', '배포', 'ROLLBACK release', 'expired', 'zz-no-such-term-zz', 'deploy expired')
+            $withRg = @($queries | ForEach-Object { Invoke-Script 'search-sessions.ps1' @('-Query', $_) })
+            try {
+                $env:PATH = $noRgPath
+                $noRg = @($queries | ForEach-Object { Invoke-Script 'search-sessions.ps1' @('-Query', $_) })
+            } finally { $env:PATH = $savedPath }
+            for ($i = 0; $i -lt $queries.Count; $i++) {
+                if ($withRg[$i].Json.prefilter -ne 'rg' -or $noRg[$i].Json.prefilter -ne 'select-string') { throw "query #$($i + 1) did not run both prefilters" }
+                Same (Json $noRg[$i].Json.sessions) (Json $withRg[$i].Json.sessions) | Out-Null
+                if (@($withRg[$i].Json.sessions | ForEach-Object sessionId) | Where-Object { $_ -in $sAuto, $sSub }) { throw "query #$($i + 1) returned an automated or subagent transcript" }
+            }
+            Same (@($withRg[0].Json.sessions.sessionId) | Where-Object { $_ -in $sTitle, $sBody }) @($sTitle, $sBody)
+        }
+    }
+
+    $archive = Get-KitPath archive
+    $namedSrc = Join-Path (Get-ProjectTranscriptDir $titled) "$script:namedId.jsonl"
+    $namedCopy = Join-Path (Join-Path $archive (ConvertTo-ProjectSlug $titled)) "$script:namedId.jsonl"
+    Check 'archive: copies the transcripts of registered sessions, then reports them up to date' {
+        $first = Invoke-Script 'archive-sessions.ps1'
+        $second = Invoke-Script 'archive-sessions.ps1'
+        $oldCopy = Join-Path (Join-Path $archive (ConvertTo-ProjectSlug $plain)) "$old.jsonl"
+        (Same $first.Json.code 'ARCHIVED') -and ($first.Json.copied -ge 2) -and (Same $first.Json.failed 0) -and (Test-Path -LiteralPath $oldCopy) -and
+        ((Get-FileHash $namedCopy).Hash -eq (Get-FileHash $namedSrc).Hash) -and
+        (Same $second.Json.copied 0) -and (Same $second.Json.upToDate $first.Json.copied)
+    }
+    Check 'archive: a transcript that grew is copied again; -All widens to every interactive transcript, never an automated one' {
+        Add-Content -LiteralPath $namedSrc -Value '{"type":"last-prompt","sessionId":"x"}'
+        $grown = Invoke-Script 'archive-sessions.ps1'
+        $all = Invoke-Script 'archive-sessions.ps1' @('-All')
+        $ids = @(Get-ChildItem -LiteralPath $archive -Recurse -Filter '*.jsonl' | ForEach-Object BaseName)
+        (Same $grown.Json.copied 1) -and ((Get-FileHash $namedCopy).Hash -eq (Get-FileHash $namedSrc).Hash) -and
+        ($all.Json.copied -gt 0) -and ($sTitle -in $ids) -and ($sAuto -notin $ids) -and ($cron -notin $ids) -and ($sSub -notin $ids)
+    }
+    Check 'archive -List: ids, folders, sizes and dates -- never content' {
+        $l = Invoke-Script 'archive-sessions.ps1' @('-List')
+        $row = @($l.Json.archives | Where-Object sessionId -eq $sTitle)[0]
+        (Same $l.Json.code 'ARCHIVE_LIST') -and (Same $l.Json.total @(Get-ChildItem -LiteralPath $archive -Recurse -Filter '*.jsonl').Count) -and
+        (Same @($row.PSObject.Properties.Name) @('sessionId', 'cwd', 'size', 'date')) -and (Same $row.cwd $finds) -and ($row.size -gt 0) -and
+        ($l.Text -notmatch 'rollback|pipeline|blog refactor|renamed late')
+    }
+
+    $settingsFile = Join-Path $cfgDir 'settings.json'
+    Check 'retention: no cleanupPeriodDays means the 30-day default; list-sessions warns, NO_RESUMABLE_SESSION carries it' {
+        $r = Invoke-Script 'list-sessions.ps1'
+        $n = Invoke-Script 'resume-session.ps1' @('-Path', $declined, '-NoPicker', '-AllowUntrusted')
+        $d = Get-TranscriptRetention
+        (Same $d.Days 30) -and (Same $d.Source 'default') -and (Same $r.Json.retentionDays 30) -and ($r.Json.warning -match 'cleanupPeriodDays') -and
+        ($r.Json.warning -match 'never 0') -and ($r.Json.warning -match 'archive-sessions') -and (Same $n.Json.code 'NO_RESUMABLE_SESSION') -and (Same $n.Json.retentionDays 30)
+    }
+    Check 'retention: a large cleanupPeriodDays silences the warning, 0 is not a period, and settings.json is never written' {
+        [IO.File]::WriteAllText($settingsFile, '{"cleanupPeriodDays": 3650, "theme": "dark"}')
+        $before = (Get-FileHash $settingsFile).Hash
+        $r = Invoke-Script 'list-sessions.ps1'
+        foreach ($run in @(@('search-sessions.ps1', '-Query', 'deploy'), @('archive-sessions.ps1', '-All'), @('archive-sessions.ps1', '-List'),
+                @('resume-session.ps1', '-Path', $declined, '-NoPicker', '-AllowUntrusted'))) { Invoke-Script $run[0] @($run | Select-Object -Skip 1) | Out-Null }
+        $large = Get-TranscriptRetention
+        $untouched = (Get-FileHash $settingsFile).Hash -eq $before
+        [IO.File]::WriteAllText($settingsFile, '{"cleanupPeriodDays": 0}')
+        $zero = Get-TranscriptRetention
+        Remove-Item -LiteralPath $settingsFile
+        (Same $r.Json.retentionDays 3650) -and ('warning' -notin $r.Json.PSObject.Properties.Name) -and (Same $large.Source 'settings') -and $untouched -and
+        (Same $zero.Days 30) -and (Same $zero.Source 'default')
+    }
+    Check 'settings.json is named only by the read-only helper and the warning, and nothing writes it' {
+        $code = @{}   # source without help blocks and comments, as the Structure checks read it
+        foreach ($f in Get-ChildItem -LiteralPath $scripts -Recurse -Filter '*.ps1') {
+            $t = [regex]::Replace([IO.File]::ReadAllText($f.FullName), '(?s)<#.*?#>', '')
+            $code[$f.Name] = ($t -split "`r?`n" | ForEach-Object { $_ -replace '(^|\s)#.*$', '' }) -join "`n"
+        }
+        $named = @($code.Keys | Where-Object { $code[$_] -match 'settings\.json' } | Sort-Object)
+        $writers = @($code.Keys | Where-Object {
+                $code[$_] -match '(Set-Content|Out-File|Add-Content|Clear-Content|WriteAll|AppendAll|Copy-Item|Move-Item|New-Item|Remove-Item|::Move|::Copy|::Create|::Replace)[^\n]*(settingsFile|settings\.json)'
+            })
+        (Same $named @('Core.State.ps1', 'list-sessions.ps1')) -and (Same $writers @())
+    }
+
     Write-Host "`nLaunch environment (a stand-in wt records what the tab would get; nothing is launched)"
     Check "launch: the tab gets none of the calling session's markers, and keeps the user's settings" {
         $stub = New-Item -ItemType Directory -Force -Path (Join-Path $sandbox 'wtstub') | ForEach-Object FullName
