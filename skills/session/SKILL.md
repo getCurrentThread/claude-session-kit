@@ -1,24 +1,21 @@
 ---
 name: session
 description: >-
-  Windows session tools for Claude Code, four jobs in one skill. (1) LAUNCH: open a NEW
-  Claude Code session in a Windows Terminal tab — a fresh scratch folder or a registered
-  workspace alias — only when the user gives an explicit launch verb together with
-  "Claude"/"session" or a workspace (클로드 켜줘, 새 임시 작업 켜줘, 세션 열어줘, <별칭> 폴더
-  켜줘, open a new claude session). (2) RESUME: reopen an EARLIER session in a new tab (아까
-  그 세션 다시 켜줘, <별칭> 폴더 이어서 켜줘, reopen my last session). (3) REBOOT-AND-CONTINUE:
-  carry the CURRENT session across a Windows restart — save the next-step prompt, register
-  a one-shot resume, restart, and pick up after logon — for work that needs a restart
-  (Windows Update, driver or feature installs, WSL/Docker/Hyper-V, registry edits) when the
-  user asks to reboot and continue (재부팅하고 이어서 해, reboot and continue); cancelling or
-  checking a scheduled resume (재부팅 취소, 재개 예약 확인) is this skill too. (4) RESTORE:
-  reopen the sessions that were open before a crash or a closed window (아까 열려 있던 세션들
-  다시 켜줘, 크래시 전 세션 복구, reopen the sessions I had open). Never fire on a
-  bare mention of a project, product or folder name without a launch verb, and never treat
-  "restart the session" as a request to restart the computer.
+  Windows session tools for Claude Code, four jobs in one skill. (1) LAUNCH a NEW session in a
+  Windows Terminal tab (a fresh scratch folder or a registered workspace alias) only on an
+  explicit launch verb with "Claude"/"session" or a workspace (클로드 켜줘, 새 임시 작업 켜줘,
+  <별칭> 폴더 켜줘, open a new claude session). (2) RESUME an EARLIER session in a new tab, also
+  one found by its title or content (아까 그 세션 다시 켜줘, <별칭> 폴더 이어서 켜줘, reopen my
+  last session). (3) REBOOT-AND-CONTINUE: carry the CURRENT session, and the other open ones,
+  across a Windows restart for work that needs one (Windows Update, drivers, WSL/Docker/Hyper-V,
+  registry edits) when the user asks to reboot and continue (재부팅하고 이어서 해); cancelling or
+  checking it (재부팅 취소, 재개 예약 확인) too. (4) RESTORE the sessions that were open before a
+  crash or a closed window (아까 열려 있던 세션들 다시 켜줘, 크래시 전 세션 복구). Never fire on
+  a bare project or folder name without a launch verb; "restart the session" is never a
+  computer restart.
 ---
 
-# session — launch a session · reopen an earlier one · reboot and continue
+# session — launch a session · reopen an earlier one · reboot and continue · restore after a crash
 
 This skill has **real side effects**: it opens terminal tabs, and its heaviest branch **restarts the
 computer.** So decide which branch applies first (§0), and run a script only after that branch's gate
@@ -46,11 +43,13 @@ The rules below apply to the user's words in whatever language they are spoken.
 | **reopen** an earlier session | §2 Resume | appends to an existing conversation |
 | **restart the computer** and continue this session | §3 Reboot | **a restart cannot be undone** |
 | cancel or inspect a scheduled restart/resume | §4 Cancel / Status | read and clean-up only |
+| bring back **the sessions that were open** before a crash, a closed window or an unplanned restart | §5 Restore | one tab per session |
 
 - **Continuation words ("continue", "again", "the one from before") do not pick a branch.** Attached
   to an open verb ("open", "turn on", "launch" — or fused with it: "reopen", "resume my last
   session") they mean §2; attached to "reboot"/"restart the computer" they mean §3. With neither,
-  run nothing and ask.
+  run nothing and ask. One exception: when the object is **the sessions that were open** (plural, or
+  "everything that was open", "before the crash", "after the window closed") it is §5, not §2.
 - A **question or a suggestion** ("should we restart the session?", "do I need to restart?") is never
   approval for any branch.
 - "Restart the session" is not a restart of the computer. The branch that turns the machine off (§3)
