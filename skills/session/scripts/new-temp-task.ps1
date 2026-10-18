@@ -12,13 +12,18 @@
   and reusing its number would drop the new session into that old history.
 
   Prints one JSON object. code: LAUNCHED | LAUNCHED_UNTRUSTED (-AllowUntrusted, the tab is on the
-  trust prompt) | UNTRUSTED_WORKSPACE | PATH_NOT_FOUND | CLAUDE_NOT_FOUND
+  trust prompt) | UNTRUSTED_WORKSPACE | PATH_NOT_FOUND | CLAUDE_NOT_FOUND | INVALID_NAME
+
+.PARAMETER Name
+  A display name for the session (`claude --name`): the tab title, the CLI's /resume
+  picker and list-sessions.ps1 all show it. Only when the user named the session.
 
 .PARAMETER AllowUntrusted
   Only after the user has been told the folder is untrusted and said to go ahead.
 #>
 [CmdletBinding()]
 param(
+    [string]$Name,
     [switch]$AllowUntrusted
 )
 
@@ -44,6 +49,9 @@ try {
             })
     }
 
+    $refusal = Get-NameRefusal $Name   # before the folder exists, for the same reason
+    if ($refusal) { Exit-WithResult $refusal }
+
     $disk = @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue | ForEach-Object Name)
     $history = @(Get-ChildItem -LiteralPath (Get-ClaudeProjectsDir) -Directory -ErrorAction SilentlyContinue | ForEach-Object Name)
     $next = Get-NextTempIndex -Prefix $settings.Prefix -DiskNames $disk -HistorySlugs $history -RootSlug (ConvertTo-ProjectSlug $root)
@@ -60,7 +68,7 @@ try {
     }
     if (-not $newDir) { throw "Could not create a scratch folder under $root." }
 
-    Exit-WithResult (Invoke-SessionLaunch -WorkDir $newDir -Mode new -Source new -AllowUntrusted:$AllowUntrusted)
+    Exit-WithResult (Invoke-SessionLaunch -WorkDir $newDir -Mode new -Source new -Name $Name -AllowUntrusted:$AllowUntrusted)
 } catch {
     Write-KitResult -Ok $false -Code 'INTERNAL_ERROR' -Message $_.Exception.Message
     exit 2

@@ -21,7 +21,7 @@
 
   Prints one JSON object.
   code: REBOOT_PLANNED | PATH_NOT_FOUND | PROMPT_NOT_FOUND | UNTRUSTED_WORKSPACE |
-        CLAUDE_NOT_FOUND | SESSION_REJECTED | RUNONCE_TOO_LONG
+        CLAUDE_NOT_FOUND | SESSION_REJECTED | RUNONCE_TOO_LONG | RESUME_PENDING | PROMPT_STALE
 
 .PARAMETER PromptFile
   UTF-8 text file with the continuation prompt. Preferred over -Prompt for any
@@ -38,7 +38,10 @@ param(
     [string]$WorkDir = '',
     [int]$DelaySeconds = 30,
     [switch]$NoReboot,
-    [switch]$AllowUntrusted
+    [switch]$AllowUntrusted,
+    [switch]$OnlyThis,
+    [switch]$Replace,
+    [switch]$AllowStalePrompt
 )
 
 $ErrorActionPreference = 'Stop'
@@ -48,6 +51,14 @@ $ErrorActionPreference = 'Stop'
 
 try {
     Initialize-KitState | Out-Null
+
+    if ((Test-Path -LiteralPath (Get-KitPath state)) -and -not $Replace) {
+        # Read like reboot-cancel does: an empty or partial file is still a pending resume.
+        $pending = $null
+        try { $pending = Get-Content -LiteralPath (Get-KitPath state) -Raw -Encoding UTF8 | ConvertFrom-Json } catch {}
+        $field = { param($n) if ($pending -and $pending.PSObject.Properties[$n]) { $pending.$n } }
+        Exit-WithResult ([ordered]@{ ok = $false; code = 'RESUME_PENDING'; sessionId = [string](& $field 'session_id'); workdir = [string](& $field 'workdir'); createdAt = (& $field 'created_at'); unreadable = ($null -eq $pending); message = 'A resume is already pending. Use -Replace to plan over it.' })
+    }
 
     if (-not $WorkDir) { $WorkDir = (Get-Location).Path }
     $resolved = Resolve-WorkspacePath $WorkDir
@@ -59,6 +70,11 @@ try {
     if ($PromptFile) {
         if (-not (Test-Path -LiteralPath $PromptFile -PathType Leaf)) {
             Exit-WithResult ([ordered]@{ ok = $false; code = 'PROMPT_NOT_FOUND'; path = $PromptFile; message = 'The prompt file does not exist. Nothing was planned.' })
+        }
+        # UTC, and bounded on both sides: a file dated in the future would stay "fresh" until then.
+        $age = [DateTime]::UtcNow - (Get-Item -LiteralPath $PromptFile).LastWriteTimeUtc
+        if (-not $AllowStalePrompt -and ($age.TotalMinutes -gt 30 -or $age.TotalMinutes -lt -5)) {
+            Exit-WithResult ([ordered]@{ ok = $false; code = 'PROMPT_STALE'; path = $PromptFile; message = 'The prompt file is more than 30 minutes old (or dated in the future). Rewrite the handoff or use -AllowStalePrompt.' })
         }
         # -Raw yields nothing at all for a zero-byte file; interpolation turns that into ''.
         $Prompt = "$(Get-Content -LiteralPath $PromptFile -Raw -Encoding UTF8)".Trim()
@@ -137,6 +153,32 @@ try {
     }
     $sessionMode = if ($SessionId) { 'resume' } else { 'fresh' }
 
+    # Only open interactive sessions with their own trusted recorded folder come back.
+    $others = @(); $alsoResume = @(); $skipped = @(); $seen = @{}
+    if (-not $OnlyThis) {
+        foreach ($row in @(Get-RunningSessions)) {
+            $id = $row.SessionId
+            if ($id -eq $SessionId -or $seen.ContainsKey($id)) { continue }
+            $seen[$id] = $true
+            $reason = $null; $rec = $null; $cwd = $null
+            if ($row.Kind -ne 'interactive') { $reason = 'NOT_INTERACTIVE' }
+            else {
+                foreach ($d in @(Get-ChildItem -LiteralPath (Get-ClaudeProjectsDir) -Directory -ErrorAction SilentlyContinue)) {
+                    $t = Join-Path $d.FullName ($id + '.jsonl')
+                    if (Test-Path -LiteralPath $t -PathType Leaf) { $rec = Get-ClaudeSessionRecord -TranscriptPath $t; break }
+                }
+                if (-not $rec) { $reason = 'TRANSCRIPT_NOT_FOUND' }
+                elseif ($rec.Kind -ne 'interactive') { $reason = 'NOT_INTERACTIVE' }
+                elseif (-not $rec.Cwd -or -not ($cwd = Resolve-WorkspacePath $rec.Cwd)) { $reason = 'PATH_NOT_FOUND' }
+                elseif (-not (Test-WorkspaceTrusted -Path $cwd)) { $reason = 'UNTRUSTED_WORKSPACE' }
+                elseif ($others.Count -ge 8) { $reason = 'LIMIT_REACHED' }
+            }
+            if ($reason) { $skipped += [ordered]@{ sessionId = $id; workdir = $row.Cwd; reason = $reason }; continue }
+            $others += [ordered]@{ session_id = $id; workdir = $cwd }
+            $alsoResume += [ordered]@{ sessionId = $id; workdir = $cwd; title = $rec.Title }
+        }
+    }
+
     # --- the RunOnce value -------------------------------------------------------
     # It points at a FROZEN COPY of the resume script under the kit's own state
     # folder, never into the plugin: an installed plugin lives in a versioned cache
@@ -167,6 +209,7 @@ try {
         workdir        = $WorkDir
         session_id     = $SessionId
         session_mode   = $sessionMode
+        others         = @($others)
         prompt         = $Prompt
         delay_seconds  = $DelaySeconds
         no_reboot      = [bool]$NoReboot
@@ -179,6 +222,7 @@ try {
     Exit-WithResult ([ordered]@{
             ok = $true; code = 'REBOOT_PLANNED'; token = $token; expiresInSeconds = 600
             workdir = $WorkDir; sessionMode = $sessionMode; sessionId = $SessionId; sessionSource = $sessionSource
+            alsoResume = @($alsoResume); skipped = @($skipped)
             prompt = (Get-TextDigest $Prompt); delaySeconds = $DelaySeconds; willReboot = (-not $NoReboot)
             runOnce = $runOnce; promptDelivery = $(if ($shim) { 'file' } else { 'argv' })
             message = $(if ($sessionMode -eq 'fresh') {

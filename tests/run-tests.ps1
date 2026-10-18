@@ -54,7 +54,11 @@ $env:CLAUDE_SESSION_KIT_HOME = $kitHome
 $env:CLAUDE_CONFIG_DIR = $cfgDir
 $env:CLAUDE_SESSION_ID = $null
 $env:CLAUDE_CODE_SESSION_ID = $null   # the suite may itself be running inside a Claude Code session
-$env:CLAUDE_CODE_BIN = $null
+# The real `claude` never runs here: a first run migrates CLAUDE_CONFIG_DIR/.claude.json and starts a
+# daemon for it. Every test that needs another stand-in sets its own and comes back to this one.
+$noClaude = Join-Path $sandbox 'claude-none.cmd'
+[IO.File]::WriteAllText($noClaude, "@echo off`r`necho []`r`n")
+$env:CLAUDE_CODE_BIN = $noClaude
 $env:CSK_TEST_WORK = $work
 
 $runOnceKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce'
@@ -103,10 +107,27 @@ try {
     Check 'argv: fork goes before --' {
         Same (Get-ClaudeArgs -Mode resume -SessionId '11111111-1111-1111-1111-111111111111' -Fork -Prompt 'x') @('--resume', '11111111-1111-1111-1111-111111111111', '--fork-session', '--', 'x')
     }
-    Check 'argv: picker is a bare --resume and refuses a prompt' {
-        (Same (Get-ClaudeArgs -Mode picker) @('--resume')) -and (Throws { Get-ClaudeArgs -Mode picker -Prompt 'x' })
+    Check 'argv: a fork can be named with --session-id; a bad fork id is refused' {
+        (Same (Get-ClaudeArgs -Mode resume -SessionId '11111111-1111-1111-1111-111111111111' -Fork -ForkSessionId '22222222-2222-2222-2222-222222222222') @('--resume', '11111111-1111-1111-1111-111111111111', '--fork-session', '--session-id', '22222222-2222-2222-2222-222222222222')) -and
+        (Throws { Get-ClaudeArgs -Mode resume -SessionId '11111111-1111-1111-1111-111111111111' -Fork -ForkSessionId 'x' })
+    }
+    Check 'argv: picker is a bare --resume and refuses a prompt; a fork still forks' {
+        (Same (Get-ClaudeArgs -Mode picker) @('--resume')) -and (Throws { Get-ClaudeArgs -Mode picker -Prompt 'x' }) -and
+        (Same (Get-ClaudeArgs -Mode picker -Fork) @('--resume', '--fork-session'))
     }
     Check 'argv: resume refuses anything that is not a session id' { Throws { Get-ClaudeArgs -Mode resume -SessionId 'latest' } }
+    Check 'argv: a name and a replayed permission mode go first; bypassPermissions is never replayed' {
+        (Same (Get-ClaudeArgs -Mode new -SessionId '11111111-1111-1111-1111-111111111111' -Name 'blog refactor' -PermissionMode plan) @('--permission-mode', 'plan', '--name', 'blog refactor', '--session-id', '11111111-1111-1111-1111-111111111111')) -and
+        (Throws { Get-ClaudeArgs -Mode resume -SessionId '11111111-1111-1111-1111-111111111111' -PermissionMode bypassPermissions }) -and
+        (Throws { Get-ClaudeArgs -Mode new -PermissionMode 'Plan' }) -and
+        (Throws { Get-ClaudeArgs -Mode new -Name "two`nlines" })
+    }
+    Check 'argv: a name wt or a .cmd shim would re-split is refused; plain and Hangul names pass' {
+        $bad = @('PR "fix login" review', 'R&D', "tab`there", 'C:\my notes\', '%USERNAME% notes', 'a|b', 'x^y', 'hi!')
+        $refused = @($bad | Where-Object { (Get-NameRefusal $_) -and (Throws { Get-ClaudeArgs -Mode new -Name $_ }) })
+        (Same $refused.Count $bad.Count) -and (Same (Get-NameRefusal $bad[0]).code 'INVALID_NAME') -and
+        ($null -eq (Get-NameRefusal "blog refactor (v2) - it's done; ok")) -and ($null -eq (Get-NameRefusal ([string]::new([char[]](0xBE14, 0xB85C, 0xADF8)))))
+    }
     Check 'session id: a trailing line feed is not part of a UUID' {
         (Test-SessionIdFormat '11111111-1111-1111-1111-111111111111') -and -not (Test-SessionIdFormat "11111111-1111-1111-1111-111111111111`n") -and
         (Throws { Get-ClaudeArgs -Mode resume -SessionId "11111111-1111-1111-1111-111111111111`n" })
@@ -210,6 +231,15 @@ try {
         $t = Resolve-ResumeTarget -Path $plain
         (Same $t.Mode 'resume-id') -and (Same $t.SessionId $newer) -and (Same $t.Source 'scan') -and (Same $t.Title 'newer work')
     }
+    Check 'resume ladder: an open session (a running row, or the asking one) is skipped; the newest closed one is chosen' {
+        $byRow = Resolve-ResumeTarget -Path $plain -RunningSessions @([pscustomobject]@{ SessionId = $newer })
+        try { $env:CLAUDE_CODE_SESSION_ID = $newer; $byEnv = Resolve-ResumeTarget -Path $plain } finally { $env:CLAUDE_CODE_SESSION_ID = $null }
+        $fork = Resolve-ResumeTarget -Path $plain -RunningSessions @([pscustomobject]@{ SessionId = $newer }) -IncludeOpen
+        $allOpen = Resolve-ResumeTarget -Path $plain -RunningSessions @([pscustomobject]@{ SessionId = $newer }, [pscustomobject]@{ SessionId = $old })
+        (Same $byRow.SessionId $old) -and (Same $byRow.Source 'scan') -and (Same $byEnv.SessionId $old) -and
+        (Same (Resolve-ResumeTarget -SessionId $newer -RunningSessions @([pscustomobject]@{ SessionId = $newer })).SessionId $newer) -and   # explicit: the launch refuses it
+        (Same $fork.SessionId $newer) -and (Same $allOpen.Mode 'none') -and ($allOpen.Reason -match '2 open right now')
+    }
     Check 'registry: append, read back, survive a damaged line' {
         Register-LaunchedSession -SessionId $old -Cwd $plain -Alias 'p' -Source open
         Add-Content -LiteralPath (Get-KitPath registry) -Value '{ this is not json'
@@ -217,9 +247,10 @@ try {
         $r = @(Get-RegisteredSessions)
         (Same $r.Count 2) -and (Same $r[0].SessionId $old) -and (Same $r[0].Alias 'p')
     }
-    Check 'resume ladder: a registered session wins over a newer unregistered one' {
+    Check 'resume ladder: a registered session wins over a newer unregistered one, unless it is open' {
         $t = Resolve-ResumeTarget -Path $plain
-        (Same $t.SessionId $old) -and (Same $t.Source 'registry')
+        $skip = Resolve-ResumeTarget -Path $plain -RunningSessions @([pscustomobject]@{ SessionId = $old })
+        (Same $t.SessionId $old) -and (Same $t.Source 'registry') -and (Same $skip.SessionId $newer) -and (Same $skip.Source 'scan')
     }
     Check 'resume ladder: explicit id must exist and be interactive' {
         (Same (Resolve-ResumeTarget -SessionId $newer).Cwd $plain) -and
@@ -234,6 +265,60 @@ try {
         ($null -eq (Resolve-WorkspacePath '\\localhost\C$\Windows')) -and ($null -eq (Resolve-WorkspacePath '//localhost/C$/Windows'))
     }
     Check 'digest never contains the text' { (Get-TextDigest 'secret plan') -notmatch 'secret' }
+
+    Write-Host "`nRunning sessions (stand-in claude; nothing is launched)"
+    $agentsDir = New-Item -ItemType Directory -Force -Path (Join-Path $sandbox 'agents') | ForEach-Object FullName
+    $agentsOk = Join-Path $agentsDir 'claude.cmd'
+    [IO.File]::WriteAllText($agentsOk, "@echo off`r`necho [{`"pid`":4242,`"cwd`":`"C:\\w`",`"kind`":`"interactive`",`"sessionId`":`"$newer`",`"name`":`"n`",`"status`":`"idle`"},{`"kind`":`"background`",`"sessionId`":`"not-a-uuid`"}]`r`n")
+    $agentsBad = Join-Path $agentsDir 'broken.cmd'
+    [IO.File]::WriteAllText($agentsBad, "@echo off`r`nexit /b 1`r`n")
+    Check 'running: `claude agents --json` is read, rows without a session id are dropped' {
+        try { $env:CLAUDE_CODE_BIN = $agentsOk; $r = @(Get-RunningSessions) } finally { $env:CLAUDE_CODE_BIN = $noClaude }
+        (Same $r.Count 1) -and (Same $r[0].SessionId $newer) -and (Same $r[0].Pid 4242) -and (Same $r[0].Source 'agents')
+    }
+    Check 'running: without the CLI, a PID record counts only while that process lives with the recorded start time (with none recorded, only a claude or node process)' {
+        $sessDir = New-Item -ItemType Directory -Force -Path (Join-Path $cfgDir 'sessions') | ForEach-Object FullName
+        $me = Get-Process -Id $PID
+        $start = $me.StartTime.ToUniversalTime().ToFileTimeUtc()
+        $dead = 4; while (Get-Process -Id $dead -ErrorAction SilentlyContinue) { $dead += 4 }
+        $alive = [guid]::NewGuid().ToString(); $reused = [guid]::NewGuid().ToString(); $gone = [guid]::NewGuid().ToString(); $undated = [guid]::NewGuid().ToString()
+        @{ "$PID.json" = @{ pid = $PID; sessionId = $alive; cwd = $plain; kind = 'bg'; procStart = "$start" }
+           'reused.json' = @{ pid = $PID; sessionId = $reused; cwd = $plain; kind = 'interactive'; procStart = "$($start + 1)" }
+           'undated.json' = @{ pid = $PID; sessionId = $undated; cwd = $plain; kind = 'interactive' }   # this PID is pwsh, not claude
+           "$dead.json" = @{ pid = $dead; sessionId = $gone; cwd = $plain; kind = 'interactive' } }.GetEnumerator() |
+            ForEach-Object { [IO.File]::WriteAllText((Join-Path $sessDir $_.Key), ($_.Value | ConvertTo-Json)) }
+        try { $env:CLAUDE_CODE_BIN = $agentsBad; $r = @(Get-RunningSessions) } finally { $env:CLAUDE_CODE_BIN = $noClaude; Remove-Item -LiteralPath $sessDir -Recurse -Force }
+        (Same @($r.SessionId) @($alive)) -and (Same $r[0].Source 'pidfile') -and (Same $r[0].Kind 'background')   # the records spell it 'bg'
+    }
+    Check 'running: a background row from `claude agents --json` keeps its job id (what `claude attach` takes)' {
+        $bgId = [guid]::NewGuid().ToString()
+        $agentsBg = Join-Path $agentsDir 'bg.cmd'
+        [IO.File]::WriteAllText($agentsBg, "@echo off`r`necho [{`"kind`":`"background`",`"sessionId`":`"$bgId`",`"id`":`"ab12cd34`",`"state`":`"blocked`"}]`r`n")
+        try { $env:CLAUDE_CODE_BIN = $agentsBg; $r = @(Get-RunningSessions) } finally { $env:CLAUDE_CODE_BIN = $noClaude }
+        (Same $r.Count 1) -and (Same $r[0].SessionId $bgId) -and (Same $r[0].Kind 'background') -and (Same $r[0].JobId 'ab12cd34')
+    }
+    Check 'launch: a session that is already open is not opened a second time; a fork still is, under a new recorded id' {
+        $probe = Join-Path $agentsDir 'probe.ps1'
+        [IO.File]::WriteAllText($probe, @'
+param($Lib, $Dir, $Id)
+. $Lib
+function Start-ClaudeTerminal { param($WorkDir, $ClaudeExe, $ClaudeArgs) $script:argv = $ClaudeArgs; 'stub' }
+function Register-LaunchedSession { param($SessionId) $script:reg = $SessionId }
+$dup  = Invoke-SessionLaunch -WorkDir $Dir -Mode resume -SessionId $Id -AllowUntrusted
+$fork = Invoke-SessionLaunch -WorkDir $Dir -Mode resume -SessionId $Id -Fork -AllowUntrusted
+$bg = Invoke-SessionLaunch -WorkDir $Dir -Mode resume -SessionId $Id -AllowUntrusted -RunningSessions @([pscustomobject]@{ SessionId = $Id; Kind = 'background'; Pid = $null; Name = $null; JobId = 'ab12cd34' })
+@{ dup = $dup.code; fork = $fork.code; forkId = $fork.sessionId; forkedFrom = $fork.forkedFrom; forkArgv = $script:argv; reg = $script:reg
+   bg = $bg.code; bgMessage = $bg.message; bgJob = $bg.jobId } | ConvertTo-Json -Compress
+'@)
+        try {
+            $env:CLAUDE_CODE_BIN = $agentsOk
+            $out = & pwsh -NoProfile -ExecutionPolicy Bypass -File $probe -Lib (Join-Path $scripts 'lib\Core.Effects.ps1') -Dir $plain -Id $newer 2>&1 | Select-Object -Last 1
+        } finally { $env:CLAUDE_CODE_BIN = $noClaude }
+        $o = "$out" | ConvertFrom-Json
+        (Same $o.dup 'ALREADY_RUNNING') -and ($o.fork -like 'RESUMED*') -and (Test-SessionIdFormat $o.forkId) -and ($o.forkId -ne $newer) -and
+        (Same $o.forkedFrom $newer) -and (Same $o.reg $o.forkId) -and (Same @($o.forkArgv) @('--resume', $newer, '--fork-session', '--session-id', $o.forkId)) -and
+        (Same $o.bg 'ALREADY_RUNNING') -and ($o.bgMessage -match 'claude attach ab12cd34') -and ($o.bgMessage -notmatch 'switch to that tab') -and (Same $o.bgJob 'ab12cd34')
+    }
 
     Write-Host "`nScripts (sandbox; nothing is launched)"
     $aliasDoc = @{ version = 2; tempTask = @{ root = $declined; prefix = 'scratch' }; aliases = @{
@@ -273,12 +358,17 @@ try {
     Check 'resume-session: nothing to resume is an error, not a guess' {
         Same (Invoke-Script 'resume-session.ps1' @('-Path', $declined, '-NoPicker', '-AllowUntrusted')).Json.code 'NO_RESUMABLE_SESSION'
     }
+    Check 'new-temp-task: a refused name creates no folder either' {
+        $r = Invoke-Script 'new-temp-task.ps1' @('-Name', 'R&D', '-AllowUntrusted')
+        (Same $r.Json.code 'INVALID_NAME') -and -not (Get-ChildItem -LiteralPath $declined -Directory)
+    }
     Check 'new-temp-task: untrusted root creates no folder' {
         $r = Invoke-Script 'new-temp-task.ps1'
         (Same $r.Json.code 'UNTRUSTED_WORKSPACE') -and -not (Get-ChildItem -LiteralPath $declined -Directory)
     }
     Check 'list-sessions: registry first, then scan, no automation' {
-        $r = Invoke-Script 'list-sessions.ps1' @('-Alias', 'good')
+        # It asks which sessions are running: the stand-in answers, since the real CLI rewrites the sandbox's .claude.json.
+        try { $env:CLAUDE_CODE_BIN = $agentsOk; $r = Invoke-Script 'list-sessions.ps1' @('-Alias', 'good') } finally { $env:CLAUDE_CODE_BIN = $noClaude }
         (Same @($r.Json.sessions.sessionId | Sort-Object) @(@($old, $newer) | Sort-Object)) -and (Same (@($r.Json.sessions | Where-Object sessionId -eq $old)[0].source) 'registry')
     }
     Check 'list-candidates: groups by recorded cwd and marks aliased folders' {
@@ -286,6 +376,511 @@ try {
         $row = @($r.Json.candidates | Where-Object { $_.path -eq $plain })[0]
         # 3 = both recent sessions plus the 45-day-old one: this listing looks back 90 days
         (Same $r.Json.code 'CANDIDATES') -and (Same $row.sessions 3) -and (Same $row.alias 'good')
+    }
+
+    Write-Host "`nOpen sessions and restore (sandbox)"
+    $hookScript = Join-Path $scripts 'track-session.ps1'
+    $openDir = Get-KitPath openSessions
+    function Get-OpenRecordFile([string]$Id) { Join-Path $openDir "$Id.json" }
+    function New-HookInput([string]$Event, [string]$Id, [hashtable]$Extra = @{}) {
+        $o = [ordered]@{ session_id = $Id; transcript_path = (Join-Path (Get-ProjectTranscriptDir $plain) "$Id.jsonl"); cwd = $plain; hook_event_name = $Event }
+        foreach ($k in $Extra.Keys) { $o[$k] = $Extra[$k] }
+        return ($o | ConvertTo-Json -Compress)
+    }
+    # Hands the hook its input on stdin, the way Claude Code does. CLAUDE_PID is always set
+    # explicitly: inherited from a session running this suite, it would name the real claude.
+    function Invoke-Hook([string]$Json, [string]$Entrypoint = 'cli', [string]$ClaudePid = '') {
+        $keep = @{ ep = $env:CLAUDE_CODE_ENTRYPOINT; cp = $env:CLAUDE_PID }
+        try {
+            $env:CLAUDE_CODE_ENTRYPOINT = $Entrypoint; $env:CLAUDE_PID = $ClaudePid
+            $out = $Json | & pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $hookScript 2>&1
+            return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Text = (@($out | ForEach-Object { "$_" }) -join "`n") }
+        } finally { $env:CLAUDE_CODE_ENTRYPOINT = $keep.ep; $env:CLAUDE_PID = $keep.cp }
+    }
+
+    Check 'command line: split by the Win32 backslash and quote rules' {
+        Same (Split-CommandLine 'a "b c" d\\"e f" "g\"h" i\j') @('a', 'b c', 'd\e f', 'g"h', 'i\j')
+    }
+    Check 'start mode: read off the claude command line; a prompt that merely mentions the flag is not the flag' {
+        (Same (Get-StartPermissionMode '"C:\bin\claude.exe" --permission-mode plan --name "a b"') 'plan') -and
+        (Same (Get-StartPermissionMode 'claude.exe --permission-mode=acceptEdits') 'acceptEdits') -and
+        (Same (Get-StartPermissionMode 'claude.exe --permission-mode plan --dangerously-skip-permissions') 'bypassPermissions') -and
+        ($null -eq (Get-StartPermissionMode 'claude.exe "fix the --permission-mode plan bug"')) -and
+        ($null -eq (Get-StartPermissionMode 'claude.exe "say \"--permission-mode plan\" now"')) -and
+        ($null -eq (Get-StartPermissionMode 'claude.exe --resume x -- --permission-mode plan')) -and
+        ($null -eq (Get-StartPermissionMode 'claude.exe --permission-mode "plan & calc"')) -and
+        ($null -eq (Get-StartPermissionMode '')) -and
+        (Same (Get-StartPermissionMode 'claude.exe --permission-mode default') 'manual')   # Manual's config value, under the name the CLI lists
+    }
+    Check 'hook: an interactive SessionStart records the session and the mode it started with, and prints nothing' {
+        # A stand-in for the claude process, so its command line carries the flag.
+        $sleeper = Join-Path $sandbox 'sleeper.ps1'; [IO.File]::WriteAllText($sleeper, 'Start-Sleep -Seconds 60')
+        $psi = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
+        foreach ($a in '-NoProfile', '-File', $sleeper, '--permission-mode', 'plan') { $psi.ArgumentList.Add($a) }
+        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+        $fake = [Diagnostics.Process]::Start($psi)
+        $id = [guid]::NewGuid().ToString()
+        try { $r = Invoke-Hook (New-HookInput 'SessionStart' $id @{ source = 'startup' }) -ClaudePid $fake.Id } finally { try { $fake.Kill() } catch {} }
+        $rec = Get-Content -LiteralPath (Get-OpenRecordFile $id) -Raw | ConvertFrom-Json
+        Remove-OpenSessionRecord -SessionId $id   # it has no transcript: restore-open would prune it
+        (Same $r.ExitCode 0) -and (Same $r.Text '') -and (Same $rec.sessionId $id) -and (Same $rec.cwd $plain) -and
+        (Same $rec.permissionMode 'plan') -and (Same $rec.source 'startup') -and ($rec.transcriptPath -like "*$id.jsonl")
+    }
+    Check 'hook: the input is read as UTF-8 under any console code page (949 here), so a Korean folder is recorded intact' {
+        $dir = Join-Path $work '한글 폴더'
+        $id = [guid]::NewGuid().ToString()
+        $in = Join-Path $sandbox 'hook-input.json'
+        $json = [ordered]@{ session_id = $id; transcript_path = (Join-Path (Get-ProjectTranscriptDir $dir) "$id.jsonl"); cwd = $dir; hook_event_name = 'SessionStart' } | ConvertTo-Json -Compress
+        [IO.File]::WriteAllText($in, $json, [Text.UTF8Encoding]::new($false))
+        # A console of its own (CreateNoWindow): chcp changes that one, never this suite's.
+        $psi = [Diagnostics.ProcessStartInfo]::new($env:ComSpec)
+        $psi.Arguments = "/d /c chcp 949 >nul & `"$((Get-Process -Id $PID).Path)`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$hookScript`" < `"$in`""
+        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+        $psi.Environment['CLAUDE_CODE_ENTRYPOINT'] = 'cli'; $psi.Environment['CLAUDE_PID'] = ''
+        $p = [Diagnostics.Process]::Start($psi); $p.WaitForExit()
+        $rec = Get-Content -LiteralPath (Get-OpenRecordFile $id) -Raw -Encoding UTF8 | ConvertFrom-Json
+        Remove-OpenSessionRecord -SessionId $id
+        (Same $rec.cwd $dir) -and ($rec.transcriptPath -like "*$id.jsonl")
+    }
+    Check 'hook: SDK, background and unmarked sessions are never recorded' {
+        $sdk = [guid]::NewGuid().ToString(); $bg = [guid]::NewGuid().ToString(); $bare = [guid]::NewGuid().ToString()
+        $a = Invoke-Hook (New-HookInput 'SessionStart' $sdk) -Entrypoint 'sdk-cli'
+        $sessDir = New-Item -ItemType Directory -Force -Path (Join-Path $cfgDir 'sessions') | ForEach-Object FullName
+        [IO.File]::WriteAllText((Join-Path $sessDir '999999.json'), '{"pid":999999,"kind":"background","entrypoint":"cli"}')
+        try { $b = Invoke-Hook (New-HookInput 'SessionStart' $bg) -ClaudePid '999999' } finally { Remove-Item -LiteralPath $sessDir -Recurse -Force }
+        $c = Invoke-Hook (New-HookInput 'SessionStart' $bare) -Entrypoint ''
+        (Same @($a.ExitCode, $b.ExitCode, $c.ExitCode) @(0, 0, 0)) -and (Same ($a.Text + $b.Text + $c.Text) '') -and
+        -not (Test-Path (Get-OpenRecordFile $sdk)) -and -not (Test-Path (Get-OpenRecordFile $bg)) -and -not (Test-Path (Get-OpenRecordFile $bare))
+    }
+    Check 'hook: a deliberate SessionEnd deletes the record; other and unknown reasons keep it' {
+        $ends = [ordered]@{ prompt_input_exit = $false; clear = $false; resume = $false; logout = $false; other = $true; 'some-future-reason' = $true }
+        foreach ($reason in @($ends.Keys)) {
+            $id = [guid]::NewGuid().ToString()
+            Set-OpenSessionRecord -SessionId $id -Cwd $plain -Source startup
+            $r = Invoke-Hook (New-HookInput 'SessionEnd' $id @{ reason = $reason })
+            if ($r.ExitCode -ne 0 -or $r.Text) { throw "SessionEnd/$reason printed or failed" }
+            if ((Test-Path (Get-OpenRecordFile $id)) -ne $ends[$reason]) { throw "SessionEnd/$reason left the record in the wrong state" }
+            Remove-OpenSessionRecord -SessionId $id
+        }
+        $true
+    }
+    Check 'hook: malformed input or a bad session id exits 0, prints nothing and writes nothing' {
+        $before = @(Get-ChildItem -LiteralPath $openDir -Name)
+        foreach ($in in @('', 'not json', '[1,2]', '{"hook_event_name":"SessionStart","session_id":"..\\..\\escape"}',
+                '{"hook_event_name":"SessionStart","session_id":"11111111-1111-1111-1111-111111111111\n"}')) {
+            $r = Invoke-Hook $in
+            if ($r.ExitCode -ne 0 -or $r.Text) { throw "input '$in' gave exit $($r.ExitCode) / '$($r.Text)'" }
+        }
+        (Same @(Get-ChildItem -LiteralPath $openDir -Name) $before) -and -not (Get-ChildItem -LiteralPath $sandbox -Recurse -Filter 'escape*')
+    }
+
+    # restore-open: transcripts in folders of their own, so the reboot tests' "newest session" stays theirs.
+    $restoreDir = New-Item -ItemType Directory -Force -Path (Join-Path $work 'trusted-parent\restore') | ForEach-Object FullName
+    $restoreUntrusted = New-Item -ItemType Directory -Force -Path (Join-Path $work 'restore-untrusted') | ForEach-Object FullName
+    function Add-OpenSession([string]$Cwd, [string]$Entrypoint, [datetime]$When, [string]$Title, [string]$Mode) {
+        $id = New-Transcript -Cwd $Cwd -Entrypoint $Entrypoint -When $When -Title $Title
+        Set-OpenSessionRecord -SessionId $id -Cwd $Cwd -TranscriptPath (Join-Path (Get-ProjectTranscriptDir $Cwd) "$id.jsonl") -PermissionMode $Mode -Source startup
+        return $id
+    }
+    $liveId = Add-OpenSession $restoreDir 'cli' (Get-Date).AddMinutes(-1) 'still open'
+    $lostA = Add-OpenSession $restoreDir 'cli' (Get-Date).AddMinutes(-10) 'lost A' 'plan'
+    $lostB = Add-OpenSession $restoreUntrusted 'cli' (Get-Date).AddMinutes(-5) 'lost B' 'bypassPermissions'
+    $autoId = Add-OpenSession $restoreDir 'sdk-cli' (Get-Date).AddMinutes(-2) $null
+    $vanished = Add-OpenSession $restoreDir 'cli' (Get-Date).AddMinutes(-3) 'vanished'
+    Remove-Item -LiteralPath (Join-Path (Get-ProjectTranscriptDir $restoreDir) "$vanished.jsonl")
+    $restoreAgents = Join-Path $agentsDir 'restore-claude.cmd'
+    [IO.File]::WriteAllText($restoreAgents, "@echo off`r`necho [{`"pid`":4343,`"cwd`":`"C:\\w`",`"kind`":`"interactive`",`"sessionId`":`"$liveId`",`"status`":`"idle`"}]`r`n")
+    function Invoke-Restore([string[]]$Arguments = @()) {
+        try { $env:CLAUDE_CODE_BIN = $restoreAgents; return (Invoke-Script 'restore-open.ps1' $Arguments) } finally { $env:CLAUDE_CODE_BIN = $noClaude }
+    }
+    # Runs a script with the launcher stubbed: the stub records each tab instead of opening it.
+    $launchLog = Join-Path $agentsDir 'launches.jsonl'
+    $stubRunner = Join-Path $agentsDir 'stub-runner.ps1'
+    [IO.File]::WriteAllText($stubRunner, @'
+param($Lib, $Script, $Log, $ArgsJson)
+. $Lib
+function Start-ClaudeTerminal { param($WorkDir, $ClaudeExe, $ClaudeArgs) Add-Content -LiteralPath $Log -Value (@{ dir = $WorkDir; argv = @($ClaudeArgs) } | ConvertTo-Json -Compress); 'stub' }
+function Register-LaunchedSession {}
+$line = '. "$PSScriptRoot\lib\Core.Effects.ps1"'
+$src = [IO.File]::ReadAllText($Script)
+# Without that line removed, the script would load the real launcher over the stubs.
+if (-not $src.Contains($line)) { throw 'the script no longer loads Core.Effects the expected way' }
+$src = $src.Replace($line, '') -replace '(?m)^#requires.*$', ''
+$splat = $ArgsJson | ConvertFrom-Json -AsHashtable
+& ([scriptblock]::Create($src)) @splat
+'@)
+    function Invoke-Stubbed([string]$Name, [string]$ArgsJson) {
+        Remove-Item -LiteralPath $launchLog -ErrorAction Ignore
+        try {
+            $env:CLAUDE_CODE_BIN = $restoreAgents
+            $out = & pwsh -NoProfile -ExecutionPolicy Bypass -File $stubRunner -Lib (Join-Path $scripts 'lib\Core.Effects.ps1') -Script (Join-Path $scripts $Name) -Log $launchLog -ArgsJson $ArgsJson 2>&1
+        } finally { $env:CLAUDE_CODE_BIN = $noClaude }
+        $json = $null; try { $json = (@($out | ForEach-Object { "$_" }) | Where-Object { $_ -match '^\{' } | Select-Object -Last 1) | ConvertFrom-Json } catch {}
+        $tabs = @(if (Test-Path -LiteralPath $launchLog) { Get-Content -LiteralPath $launchLog | ForEach-Object { $_ | ConvertFrom-Json } })
+        return [pscustomobject]@{ Json = $json; Tabs = $tabs }
+    }
+
+    Check 'restore-open: lists only sessions that are not running, newest first; prunes vanished and automated records' {
+        $r = Invoke-Restore
+        (Same $r.ExitCode 0) -and (Same $r.Json.code 'OPEN_SESSIONS') -and (Same @($r.Json.sessions.sessionId) @($lostB, $lostA)) -and
+        (Same @($r.Json.sessions.n) @(1, 2)) -and (Same $r.Json.sessions[1].title 'lost A') -and (Same $r.Json.sessions[1].permissionMode 'plan') -and
+        (Same $r.Json.sessions[1].cwdExists $true) -and (Same $r.Json.pruned 2) -and
+        (Test-Path (Get-OpenRecordFile $liveId)) -and -not (Test-Path (Get-OpenRecordFile $vanished)) -and -not (Test-Path (Get-OpenRecordFile $autoId))
+    }
+    Check 'restore-open: the asking session is never offered, even when the CLI cannot see it' {
+        $keep = $env:CLAUDE_CODE_SESSION_ID
+        try { $env:CLAUDE_CODE_SESSION_ID = $lostB; $r = Invoke-Restore } finally { $env:CLAUDE_CODE_SESSION_ID = $keep }
+        Same @($r.Json.sessions.sessionId) @($lostA)
+    }
+    Check 'restore-open: -Forget takes "3,<id>" as pwsh -File hands it over and opens nothing; a row not in the list or two actions are refused' {
+        $extra = Add-OpenSession $restoreDir 'cli' (Get-Date).AddMinutes(-30) 'forget me'
+        $extra2 = Add-OpenSession $restoreDir 'cli' (Get-Date).AddMinutes(-40) 'forget me too'
+        $bad = Invoke-Restore @('-Forget', '3,9')
+        $both = Invoke-Restore @('-All', '-Forget', '3')
+        $kept = (Test-Path (Get-OpenRecordFile $extra)) -and (Test-Path (Get-OpenRecordFile $extra2))
+        $f = Invoke-Restore @('-Forget', "3,$extra2")
+        (Same $bad.Json.code 'NOT_IN_LIST') -and (Same @($bad.Json.notInList) @('9')) -and (Same $both.Json.code 'CONFLICTING_OPTIONS') -and $kept -and
+        (Same $f.Json.code 'FORGOTTEN') -and (Same @($f.Json.forgotten.sessionId) @($extra, $extra2)) -and
+        -not (Test-Path (Get-OpenRecordFile $extra)) -and -not (Test-Path (Get-OpenRecordFile $extra2)) -and
+        (Test-Path (Get-OpenRecordFile $lostA)) -and (Test-Path (Get-OpenRecordFile $lostB))
+    }
+    Check 'restore-open -Ids: each tab resumes in its transcript''s folder with its start mode; untrusted is refused; bypass is never replayed' {
+        # After a `cd` and a compact the hook holds another cwd; the transcript's folder still wins.
+        $sub = New-Item -ItemType Directory -Force -Path (Join-Path $restoreDir 'sub') | ForEach-Object FullName
+        Set-OpenSessionRecord -SessionId $lostA -Cwd $sub -TranscriptPath (Join-Path (Get-ProjectTranscriptDir $restoreDir) "$lostA.jsonl") -PermissionMode 'plan' -Source compact
+        $r = Invoke-Stubbed 'restore-open.ps1' '{"Ids":"1,2"}'   # one string, the way pwsh -File delivers it
+        $u = Invoke-Stubbed 'restore-open.ps1' "{`"Ids`":[`"$lostB`"],`"AllowUntrusted`":true}"
+        (Same $r.Json.code 'RESTORED') -and (Same $r.Json.opened 1) -and
+        (Same @($r.Json.results.code) @('UNTRUSTED_WORKSPACE', 'RESUMED')) -and (Same $r.Json.results[0].droppedPermissionMode 'bypassPermissions') -and
+        (Same $r.Json.results[1].permissionMode 'plan') -and (Same $r.Tabs.Count 1) -and (Same $r.Tabs[0].dir $restoreDir) -and
+        (Same @($r.Tabs[0].argv) @('--permission-mode', 'plan', '--resume', $lostA)) -and
+        (Same $u.Json.results[0].code 'RESUMED_UNTRUSTED') -and (Same @($u.Tabs[0].argv) @('--resume', $lostB)) -and (Same $u.Json.results[0].droppedPermissionMode 'bypassPermissions')
+    }
+    Check 'restore-open -All: reopens every listed candidate; an untrusted one is refused' {
+        $r = Invoke-Stubbed 'restore-open.ps1' '{"All":true}'
+        (Same $r.Json.code 'RESTORED') -and (Same $r.Json.requested 2) -and (Same $r.Json.opened 1) -and
+        (Same @($r.Json.results.code) @('UNTRUSTED_WORKSPACE', 'RESUMED')) -and (Same $r.Tabs.Count 1) -and (Same @($r.Tabs[0].argv)[-1] $lostA)
+    }
+    Check 'restore-open: a record whose transcript moved to another project folder (/cd, a worktree) is listed, not pruned; -ForgetAll forgets all and opens nothing' {
+        $own = Join-Path $sandbox 'kit-moved'
+        $wtCwd = Join-Path $restoreDir '.claude\worktrees\w'   # only its project folder is needed
+        $made = @()
+        try {
+            $env:CLAUDE_SESSION_KIT_HOME = $own
+            # what a move leaves: the file under the new folder's slug, the old cwd in its head, a relocated record after it
+            $moved = [guid]::NewGuid().ToString()
+            $movedFile = Join-Path (Get-ProjectTranscriptDir $wtCwd) "$moved.jsonl"
+            New-Item -ItemType Directory -Force -Path (Split-Path $movedFile) | Out-Null
+            [IO.File]::WriteAllLines($movedFile, [string[]]@(
+                    (@{ type = 'user'; entrypoint = 'cli'; cwd = $restoreDir; sessionId = $moved; message = @{ role = 'user'; content = 'start' } } | ConvertTo-Json -Compress -Depth 4),
+                    (@{ type = 'relocated'; relocatedCwd = $wtCwd; sessionId = $moved } | ConvertTo-Json -Compress),
+                    (@{ type = 'ai-title'; aiTitle = 'moved'; sessionId = $moved } | ConvertTo-Json -Compress)))
+            (Get-Item $movedFile).LastWriteTime = (Get-Date).AddMinutes(-7)
+            $made += $movedFile
+            Set-OpenSessionRecord -SessionId $moved -Cwd $restoreDir -TranscriptPath (Join-Path (Get-ProjectTranscriptDir $restoreDir) "$moved.jsonl") -Source startup
+            $other = Add-OpenSession $restoreDir 'cli' (Get-Date).AddMinutes(-8) 'other'
+            $made += Join-Path (Get-ProjectTranscriptDir $restoreDir) "$other.jsonl"
+            $l = Invoke-Restore
+            $kept = Test-Path (Join-Path (Get-KitPath openSessions) "$moved.json")
+            $f = Invoke-Stubbed 'restore-open.ps1' '{"ForgetAll":true}'
+            $gone = Same @(Get-ChildItem -LiteralPath (Get-KitPath openSessions) -Filter '*.json' -Name) @()
+        } finally { $env:CLAUDE_SESSION_KIT_HOME = $kitHome; $made | ForEach-Object { Remove-Item -LiteralPath $_ -ErrorAction Ignore } }
+        (Same @($l.Json.sessions.sessionId) @($moved, $other)) -and (Same $l.Json.pruned 0) -and $kept -and (Same $l.Json.sessions[0].cwd $wtCwd) -and
+        (Same $f.Json.code 'FORGOTTEN') -and (Same @($f.Json.forgotten.sessionId) @($moved, $other)) -and (Same $f.Tabs.Count 0) -and $gone
+    }
+    Check 'restore-open: nothing left to reopen says so' {
+        $empty = Join-Path $sandbox 'kit-empty'
+        try { $env:CLAUDE_SESSION_KIT_HOME = $empty; $r = Invoke-Restore @('-All') } finally { $env:CLAUDE_SESSION_KIT_HOME = $kitHome }
+        (Same $r.ExitCode 0) -and (Same $r.Json.code 'NOTHING_TO_RESTORE')
+    }
+    Check 'resume-session: replays the mode the session was started with' {
+        $r = Invoke-Stubbed 'resume-session.ps1' "{`"SessionId`":`"$lostA`"}"
+        (Same $r.Json.code 'RESUMED') -and (Same $r.Json.permissionMode 'plan') -and (Same @($r.Tabs[0].argv) @('--permission-mode', 'plan', '--resume', $lostA))
+    }
+    Check 'list-sessions: each row says whether that session is open right now' {
+        try { $env:CLAUDE_CODE_BIN = $agentsOk; $r = Invoke-Script 'list-sessions.ps1' @('-Alias', 'good') } finally { $env:CLAUDE_CODE_BIN = $noClaude }
+        (Same (@($r.Json.sessions | Where-Object sessionId -eq $newer)[0].running) $true) -and (Same (@($r.Json.sessions | Where-Object sessionId -eq $old)[0].running) $false)
+    }
+    Check 'hooks.json: SessionStart and SessionEnd run track-session.ps1 directly, no shell; SessionEnd is not async' {
+        $h = Get-Content -LiteralPath (Join-Path $repo 'hooks\hooks.json') -Raw | ConvertFrom-Json
+        $target = '${CLAUDE_PLUGIN_ROOT}/skills/session/scripts/track-session.ps1'
+        $each = foreach ($ev in 'SessionStart', 'SessionEnd') {
+            $hs = @($h.hooks.$ev | ForEach-Object { $_.hooks })
+            if ($hs.Count -ne 1 -or $hs[0].type -ne 'command' -or $hs[0].command -ne 'pwsh' -or @($hs[0].args)[-1] -cne $target) { throw "$ev is not the track-session hook" }
+            $hs[0]
+        }
+        (Test-Path (Join-Path $repo ($target -replace '^\$\{CLAUDE_PLUGIN_ROOT\}/', ''))) -and ('-NoProfile' -in $each[0].args) -and -not $each[1].PSObject.Properties['async']
+    }
+
+    Write-Host "`nTitles, search and retention (sandbox)"
+    # Own folders, so nothing here becomes the "newest session" the reboot tests below expect.
+    $titled = New-Item -ItemType Directory -Force -Path (Join-Path $work 'trusted-parent\titled') | ForEach-Object FullName
+    $finds  = New-Item -ItemType Directory -Force -Path (Join-Path $work 'trusted-parent\finds') | ForEach-Object FullName
+    # A transcript from records; user/assistant ones get the entrypoint and cwd a CLI transcript carries.
+    function New-Chat([string]$Cwd, [object[]]$Records, [string]$Entrypoint = 'cli', [string]$SubDir, [string]$Id = [guid]::NewGuid().ToString()) {
+        $dir = Join-Path (Join-Path $cfgDir 'projects') (ConvertTo-ProjectSlug $Cwd)
+        if ($SubDir) { $dir = Join-Path $dir $SubDir }
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        $lines = foreach ($r in $Records) {
+            if ($r['type'] -in 'user', 'assistant') { $r = $r + @{ entrypoint = $Entrypoint; cwd = $Cwd } }
+            ($r + @{ sessionId = $Id }) | ConvertTo-Json -Compress -Depth 6
+        }
+        [IO.File]::WriteAllLines((Join-Path $dir "$Id.jsonl"), [string[]]$lines)
+        return $Id
+    }
+    function Say([string]$Text) { @{ type = 'user'; message = @{ role = 'user'; content = $Text } } }
+    function Reply([string]$Text) { @{ type = 'assistant'; message = @{ role = 'assistant'; content = @(@{ type = 'text'; text = $Text }) } } }
+    function Titled([string]$Kind, [string]$Text) { if ($Kind -eq 'custom') { @{ type = 'custom-title'; customTitle = $Text } } else { @{ type = 'ai-title'; aiTitle = $Text } } }
+    function Json($o) { $o | ConvertTo-Json -Compress -Depth 6 }
+
+    Check 'folder: the last relocated record (a /cd or worktree move, in the tail) wins over the first cwd' {
+        $head = '{"type":"user","entrypoint":"cli","cwd":"C:\\one","sessionId":"x","message":{"role":"user","content":"hi"}}'
+        $moved = Get-TranscriptHeadInfo -Lines @($head) -TailLines @('{"type":"relocated","relocatedCwd":"C:\\two"}', '{"type":"relocated","relocatedCwd":"C:\\three"}')
+        (Same $moved.Cwd 'C:\three') -and (Same $moved.Kind 'interactive') -and (Same (Get-TranscriptHeadInfo -Lines @($head)).Cwd 'C:\one')
+    }
+    Check 'titles: the last custom-title wins over any ai-title, even a later one' {
+        $t = Get-TranscriptHeadInfo -Lines @((Json (Titled custom 'first name')), (Json (Titled ai 'summary')), (Json (Titled custom 'renamed')), (Json (Titled ai 'later summary')))
+        (Same $t.Title 'renamed') -and (Same $t.TitleSource 'custom')
+    }
+    Check 'titles: then the last ai-title; then the first real prompt (no meta, <command> text, tool output or CLI notice) as one short line' {
+        $meta = '{"type":"user","isMeta":true,"message":{"role":"user","content":"injected caveat"}}'
+        $cmd  = '{"type":"user","message":{"role":"user","content":"<command-name>/model</command-name>"}}'
+        $tool = '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"output"}]}}'
+        $esc  = '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}'
+        $note = '{"type":"user","promptSource":"system","origin":{"kind":"task-notification"},"message":{"role":"user","content":"task done"}}'
+        $sum  = '{"type":"user","isCompactSummary":true,"message":{"role":"user","content":"This session is being continued"}}'
+        $ai   = Get-TranscriptHeadInfo -Lines @((Json (Titled ai 'one')), (Json (Titled ai 'two')))
+        $p    = Get-TranscriptHeadInfo -Lines @($meta, $cmd, $tool, $esc, $note, $sum, '{"type":"user","message":{"role":"user","content":"  fix the\n\n login   bug "}}', (Json (Say 'second prompt')))
+        $long = Get-TranscriptHeadInfo -Lines @((Json (Say ('word ' * 60))))
+        $none = Get-TranscriptHeadInfo -Lines @($meta, $cmd, $tool, $esc, $note, $sum)
+        # typed by the person, so a prompt even though it opens with '<'; the wrappers carry no promptSource
+        $lt   = Get-TranscriptHeadInfo -Lines @($cmd, '{"type":"user","promptSource":"typed","message":{"role":"user","content":"<div class=\"x\"> why is this wide"}}')
+        (Same $ai.Title 'two') -and (Same $ai.TitleSource 'ai') -and (Same $p.Title 'fix the login bug') -and (Same $p.TitleSource 'prompt') -and
+        ($long.Title.Length -le 80) -and $long.Title.EndsWith('...') -and ($null -eq $none.Title) -and ($null -eq $none.TitleSource) -and
+        (Same $lt.Title '<div class="x"> why is this wide') -and (Same $lt.TitleSource 'prompt')
+    }
+    Check 'one line: whitespace collapses, cuts are marked, the window keeps the term, no half surrogate pair' {
+        $smile = [char]::ConvertFromUtf32(0x1F600)
+        $s = ConvertTo-OneLine -Text (('alpha ' * 30) + "needle`n" + ('omega ' * 30)) -Max 120 -Term 'NEEDLE'
+        $end = ConvertTo-OneLine -Text (('x' * 76) + $smile + ('y' * 50)) -Max 80
+        $lead = ConvertTo-OneLine -Text (('a' * 10) + $smile + ('b' * 39) + 'needle' + ('c' * 100)) -Max 120 -Term 'needle'
+        ($s.Length -le 120) -and ($s -match 'needle omega') -and $s.StartsWith('...') -and $s.EndsWith('...') -and
+        (Same $end (('x' * 76) + '...')) -and ($lead -match 'needle') -and ($lead -notmatch '[\uD800-\uDFFF]') -and ($lead.Length -le 120)
+    }
+    Check 'titles: a /rename far past the old 120-line head (and past 64 KB) is found in the tail window' {
+        $recs = @((Titled ai 'early summary'), (Say 'start the work')) + @(1..200 | ForEach-Object { Reply (('filler ' * 90) + $_) }) + @((Titled custom 'renamed late'), (Reply 'after the rename'))
+        $file = Join-Path (Get-ProjectTranscriptDir $titled) ((New-Chat -Cwd $titled -Records $recs) + '.jsonl')
+        $rec = Get-ClaudeSessionRecord -TranscriptPath $file
+        ((Get-Item $file).Length -gt 64KB) -and (Same $rec.Kind 'interactive') -and (Same $rec.Title 'renamed late') -and (Same $rec.TitleSource 'custom')
+    }
+    Check 'titles: a /rename that starts exactly where the 64 KB tail window starts is still found' {
+        $id = New-Chat -Cwd $titled -Records (@((Titled ai 'early summary'), (Say 'start the work')) + @(1..130 | ForEach-Object { Reply "filler $_" }))
+        $file = Join-Path (Get-ProjectTranscriptDir $titled) "$id.jsonl"
+        $title = Json ((Titled custom 'on the boundary') + @{ sessionId = $id })
+        $pad = { param($n) Json ((Reply ('x' * $n)) + @{ entrypoint = 'cli'; cwd = $titled; sessionId = $id }) }
+        $room = 64KB - ($title.Length + 2) - 2 - (& $pad 0).Length
+        [IO.File]::AppendAllText($file, $title + "`r`n" + (& $pad $room) + "`r`n")
+        $bytes = [IO.File]::ReadAllBytes($file); $at = $bytes.Length - 64KB
+        $rec = Get-ClaudeSessionRecord -TranscriptPath $file
+        (Same $bytes[$at - 1] ([byte]10)) -and (Same ([Text.Encoding]::UTF8.GetString($bytes, $at, $title.Length)) $title) -and
+        (Same $rec.Title 'on the boundary') -and (Same $rec.TitleSource 'custom')
+    }
+    Check '-Name: reaches the claude argv and the registry; list-sessions shows it until the transcript records a title' {
+        $probe = Join-Path $sandbox 'nameprobe.ps1'
+        [IO.File]::WriteAllText($probe, @'
+param($Lib, $Dir)
+. $Lib
+function Start-ClaudeTerminal { param($WorkDir, $ClaudeExe, $ClaudeArgs) $script:argv = $ClaudeArgs; 'stub' }
+$r = Invoke-SessionLaunch -WorkDir $Dir -Mode new -Source open -Name 'blog refactor' -AllowUntrusted
+@{ sessionId = $r.sessionId; argv = $script:argv } | ConvertTo-Json -Compress
+'@)
+        try {
+            $env:CLAUDE_CODE_BIN = $agentsOk
+            $out = & pwsh -NoProfile -ExecutionPolicy Bypass -File $probe -Lib (Join-Path $scripts 'lib\Core.Effects.ps1') -Dir $titled 2>&1 | Select-Object -Last 1
+        } finally { $env:CLAUDE_CODE_BIN = $noClaude }
+        $o = "$out" | ConvertFrom-Json
+        $script:namedId = $o.sessionId
+        $reg = @(Get-RegisteredSessions | Where-Object SessionId -eq $o.sessionId)
+        New-Chat -Cwd $titled -Records @((Say '<command-name>/clear</command-name>')) -Id $o.sessionId | Out-Null   # written, no title yet
+        $row = @((Invoke-Script 'list-sessions.ps1' @('-Path', $titled)).Json.sessions | Where-Object sessionId -eq $o.sessionId)[0]
+        $wired = @('open-workspace.ps1', 'new-temp-task.ps1' | Where-Object { (Get-Content (Join-Path $scripts $_) -Raw) -match 'Invoke-SessionLaunch[^\r\n]*-Name \$Name' })
+        # a later /rename wins over the launch name; an ai title would not
+        New-Chat -Cwd $titled -Records @((Say '<command-name>/clear</command-name>'), (Titled custom 'renamed')) -Id $o.sessionId | Out-Null
+        $renamed = @((Invoke-Script 'list-sessions.ps1' @('-Path', $titled)).Json.sessions | Where-Object sessionId -eq $o.sessionId)[0]
+        New-Chat -Cwd $titled -Records @((Say '<command-name>/clear</command-name>')) -Id $o.sessionId | Out-Null
+        (Same @($o.argv[0..1]) @('--name', 'blog refactor')) -and (Same $reg.Count 1) -and (Same $reg[0].Name 'blog refactor') -and
+        (Same $row.title 'blog refactor') -and (Same $row.titleSource 'custom') -and (Same $wired.Count 2) -and
+        (Same $renamed.title 'renamed') -and (Same $renamed.titleSource 'custom')
+    }
+    Check 'registry: a row written before names existed still loads' {
+        $legacy = [guid]::NewGuid().ToString()
+        Add-Content -LiteralPath (Get-KitPath registry) -Value (@{ sessionId = $legacy; cwd = $titled; alias = $null; source = 'open'; startedAt = (Get-Date).ToString('o') } | ConvertTo-Json -Compress)
+        $r = @(Get-RegisteredSessions | Where-Object SessionId -eq $legacy)
+        (Same $r.Count 1) -and (Same $r[0].Name '')
+    }
+
+    $sTitle = New-Chat -Cwd $finds -Records @((Titled ai 'deploy pipeline notes'), (Say 'how do we roll back the release'), (Reply 'run the rollback script, then redeploy'))
+    $sBody  = New-Chat -Cwd $finds -Records @((Titled ai 'stage incident'), (Say 'the deploy failed again on stage'), (Reply ('checked the logs. ' + ('filler text ' * 30) + "the 배포 key expired`nrotate it and retry")),
+        (Say '<bash-stdout>shelltokenzz=1</bash-stdout><bash-stderr></bash-stderr>'))
+    $sAuto  = New-Chat -Cwd $finds -Entrypoint 'sdk-cli' -Records @((Say 'deploy rollback release 배포 expired'), (Reply 'deploy'))
+    $sSub   = New-Chat -Cwd $finds -SubDir 'subagents' -Records @((Say 'deploy rollback release 배포 expired'))
+    # the body-only session is the newer one, so only the title weight can rank the other first
+    (Get-Item (Join-Path (Get-ProjectTranscriptDir $finds) "$sTitle.jsonl")).LastWriteTime = (Get-Date).AddHours(-3)
+    (Get-Item (Join-Path (Get-ProjectTranscriptDir $finds) "$sBody.jsonl")).LastWriteTime = (Get-Date).AddHours(-1)
+
+    Check 'search: every term has to match, case-insensitive; automated and subagent transcripts never come back' {
+        $r = Invoke-Script 'search-sessions.ps1' @('-Query', 'ROLLBACK release', '-Path', $finds)
+        $split = Invoke-Script 'search-sessions.ps1' @('-Query', 'deploy expired', '-Path', $finds)   # OR would also bring back $sTitle
+        (Same $r.ExitCode 0) -and (Same $r.Json.code 'SEARCH_RESULTS') -and (Same @($r.Json.sessions.sessionId) @($sTitle)) -and (Same $r.Json.total 1) -and
+        (Same @($split.Json.sessions.sessionId) @($sBody))
+    }
+    Check 'search: the asking session (CLAUDE_CODE_SESSION_ID) is left out, and command output is not message text' {
+        try { $env:CLAUDE_CODE_SESSION_ID = $sTitle; $r = Invoke-Script 'search-sessions.ps1' @('-Query', 'deploy', '-Path', $finds) } finally { $env:CLAUDE_CODE_SESSION_ID = $null }
+        $shell = Invoke-Script 'search-sessions.ps1' @('-Query', 'shelltokenzz', '-Path', $finds)
+        (Same @($r.Json.sessions.sessionId) @($sBody)) -and (Same $shell.Json.code 'SEARCH_RESULTS') -and (Same $shell.Json.total 0)
+    }
+    Check 'search: a Hangul term matches message text' {
+        $r = Invoke-Script 'search-sessions.ps1' @('-Query', '배포', '-Path', $finds)
+        (Same @($r.Json.sessions.sessionId) @($sBody)) -and (Same @($r.Json.sessions[0].matchedIn) @('body'))
+    }
+    Check 'search: a title hit outranks a newer session that only mentions the term' {
+        $r = Invoke-Script 'search-sessions.ps1' @('-Query', 'deploy', '-Path', $finds)
+        (Same @($r.Json.sessions.sessionId) @($sTitle, $sBody)) -and ($r.Json.sessions[0].score -gt $r.Json.sessions[1].score) -and
+        (Same @($r.Json.sessions[0].matchedIn) @('title')) -and (Same $r.Json.sessions[0].titleSource 'ai') -and ($null -eq $r.Json.sessions[0].snippet)
+    }
+    Check 'search: an untitled session''s first prompt scores as message text, not as a title' {
+        $zebra = New-Item -ItemType Directory -Force -Path (Join-Path $work 'trusted-parent\stripes') | ForEach-Object FullName
+        $untitled = New-Chat -Cwd $zebra -Records @((Say 'plan the zebra migration'))
+        $named = New-Chat -Cwd $zebra -Records @((Titled ai 'misc chores'), (Say 'plan the zebra migration'))
+        (Get-Item (Join-Path (Get-ProjectTranscriptDir $zebra) "$untitled.jsonl")).LastWriteTime = (Get-Date).AddDays(-5)
+        $r = Invoke-Script 'search-sessions.ps1' @('-Query:zebra', '-Path', $zebra)
+        (Same @($r.Json.sessions.sessionId) @($named, $untitled)) -and (Same @($r.Json.sessions[1].matchedIn) @('body')) -and
+        (Same $r.Json.sessions[1].titleSource 'prompt') -and (Same $r.Json.sessions[0].score $r.Json.sessions[1].score)
+    }
+    Check 'search: a term that looks like a parameter binds with the documented -Query: form' {
+        $r = Invoke-Script 'search-sessions.ps1' @('-Query:-p', '-Path', $finds)
+        (Same $r.ExitCode 0) -and (Same $r.Json.code 'SEARCH_RESULTS') -and (Same @($r.Json.terms) @('-p'))
+    }
+    Check 'search: a folder term matches the folder''s own name, not a parent folder in its path' {
+        $leaf = Invoke-Script 'search-sessions.ps1' @('-Query', 'finds rollback', '-Path', $finds)
+        $parent = Invoke-Script 'search-sessions.ps1' @('-Query', 'trusted rollback', '-Path', $finds)
+        (Same @($leaf.Json.sessions.sessionId) @($sTitle)) -and (Same @($leaf.Json.sessions[0].matchedIn) @('cwd', 'body')) -and (Same $parent.Json.total 0)
+    }
+    Check 'search: the snippet is one line of at most 120 characters around the first message hit' {
+        $r = Invoke-Script 'search-sessions.ps1' @('-Query', 'expired', '-Path', $finds)
+        $snip = $r.Json.sessions[0].snippet
+        (Same $r.Json.sessions[0].sessionId $sBody) -and ($snip.Length -le 120) -and ($snip -notmatch '[\r\n]') -and ($snip -match 'expired rotate') -and $snip.StartsWith('...')
+    }
+    Check 'search: no match is an empty SEARCH_RESULTS, not an error' {
+        $r = Invoke-Script 'search-sessions.ps1' @('-Query', 'zz-no-such-term-zz')
+        (Same $r.ExitCode 0) -and (Same $r.Json.code 'SEARCH_RESULTS') -and (Same $r.Json.total 0) -and (Same @($r.Json.sessions).Count 0)
+    }
+    # hide rg: drop every PATH entry that holds rg.exe, keep the pwsh that runs the scripts
+    $noRgPath = (@(Split-Path (Get-Process -Id $PID).Path) + @($env:PATH -split ';' | Where-Object { $_ -and -not (Test-Path -LiteralPath (Join-Path $_ 'rg.exe')) })) -join ';'
+    $savedPath = $env:PATH
+    try { $env:PATH = $noRgPath; $rgHidden = -not (Get-Command rg.exe -CommandType Application -ErrorAction SilentlyContinue) } finally { $env:PATH = $savedPath }
+    if (-not (Get-Command rg.exe -CommandType Application -ErrorAction SilentlyContinue)) {
+        Skip 'search: the rg and Select-String prefilters give the same results' 'rg is not on PATH'
+    } elseif (-not $rgHidden) {
+        Skip 'search: the rg and Select-String prefilters give the same results' 'rg.exe sits next to pwsh and cannot be hidden'
+    } else {
+        Check 'search: the rg and Select-String prefilters give the same results' {
+            $queries = @('deploy', '배포', 'ROLLBACK release', 'expired', 'zz-no-such-term-zz', 'deploy expired')
+            $withRg = @($queries | ForEach-Object { Invoke-Script 'search-sessions.ps1' @('-Query', $_) })
+            try {
+                $env:PATH = $noRgPath
+                $noRg = @($queries | ForEach-Object { Invoke-Script 'search-sessions.ps1' @('-Query', $_) })
+            } finally { $env:PATH = $savedPath }
+            for ($i = 0; $i -lt $queries.Count; $i++) {
+                if ($withRg[$i].Json.prefilter -ne 'rg' -or $noRg[$i].Json.prefilter -ne 'select-string') { throw "query #$($i + 1) did not run both prefilters" }
+                Same (Json $noRg[$i].Json.sessions) (Json $withRg[$i].Json.sessions) | Out-Null
+                if (@($withRg[$i].Json.sessions | ForEach-Object sessionId) | Where-Object { $_ -in $sAuto, $sSub }) { throw "query #$($i + 1) returned an automated or subagent transcript" }
+            }
+            Same (@($withRg[0].Json.sessions.sessionId) | Where-Object { $_ -in $sTitle, $sBody }) @($sTitle, $sBody)
+        }
+    }
+
+    $archive = Get-KitPath archive
+    $namedSrc = Join-Path (Get-ProjectTranscriptDir $titled) "$script:namedId.jsonl"
+    $namedCopy = Join-Path (Join-Path $archive (ConvertTo-ProjectSlug $titled)) "$script:namedId.jsonl"
+    Check 'archive: copies the transcripts of registered sessions, then reports them up to date' {
+        $first = Invoke-Script 'archive-sessions.ps1'
+        $second = Invoke-Script 'archive-sessions.ps1'
+        $oldCopy = Join-Path (Join-Path $archive (ConvertTo-ProjectSlug $plain)) "$old.jsonl"
+        (Same $first.Json.code 'ARCHIVED') -and ($first.Json.copied -ge 2) -and (Same $first.Json.failed 0) -and (Test-Path -LiteralPath $oldCopy) -and
+        ((Get-FileHash $namedCopy).Hash -eq (Get-FileHash $namedSrc).Hash) -and
+        (Same $second.Json.copied 0) -and (Same $second.Json.upToDate $first.Json.copied)
+    }
+    Check 'archive: a transcript that grew is copied again; -All widens to every interactive transcript, never an automated one' {
+        Add-Content -LiteralPath $namedSrc -Value '{"type":"last-prompt","sessionId":"x"}'
+        $grown = Invoke-Script 'archive-sessions.ps1'
+        $all = Invoke-Script 'archive-sessions.ps1' @('-All')
+        $ids = @(Get-ChildItem -LiteralPath $archive -Recurse -Filter '*.jsonl' | ForEach-Object BaseName)
+        (Same $grown.Json.copied 1) -and ((Get-FileHash $namedCopy).Hash -eq (Get-FileHash $namedSrc).Hash) -and
+        ($all.Json.copied -gt 0) -and ($sTitle -in $ids) -and ($sAuto -notin $ids) -and ($cron -notin $ids) -and ($sSub -notin $ids)
+    }
+    Check 'archive: a registered session whose transcript moved to another project folder (EnterWorktree) is still copied' {
+        $moved = [guid]::NewGuid().ToString()
+        Register-LaunchedSession -SessionId $moved -Cwd $titled -Source open
+        $wtCwd = Join-Path $titled '.claude\worktrees\x'   # only its project folder is needed
+        New-Chat -Cwd $wtCwd -Records @((Say 'work in the worktree')) -Id $moved | Out-Null
+        $r = Invoke-Script 'archive-sessions.ps1'
+        (Same $r.Json.failed 0) -and (Test-Path -LiteralPath (Join-Path (Join-Path $archive (ConvertTo-ProjectSlug $wtCwd)) "$moved.jsonl"))
+    }
+    Check 'archive -List: ids, folders, sizes and dates -- never content' {
+        $l = Invoke-Script 'archive-sessions.ps1' @('-List')
+        $row = @($l.Json.archives | Where-Object sessionId -eq $sTitle)[0]
+        (Same $l.Json.code 'ARCHIVE_LIST') -and (Same $l.Json.total @(Get-ChildItem -LiteralPath $archive -Recurse -Filter '*.jsonl').Count) -and
+        (Same @($row.PSObject.Properties.Name) @('sessionId', 'cwd', 'size', 'date')) -and (Same $row.cwd $finds) -and ($row.size -gt 0) -and
+        ($l.Text -notmatch 'rollback|pipeline|blog refactor|renamed late')
+    }
+
+    $settingsFile = Join-Path $cfgDir 'settings.json'
+    Check 'retention: no cleanupPeriodDays means the 30-day default; list-sessions warns, NO_RESUMABLE_SESSION carries it' {
+        $r = Invoke-Script 'list-sessions.ps1'
+        $n = Invoke-Script 'resume-session.ps1' @('-Path', $declined, '-NoPicker', '-AllowUntrusted')
+        $d = Get-TranscriptRetention
+        (Same $d.Days 30) -and (Same $d.Source 'default') -and (Same $r.Json.retentionDays 30) -and ($r.Json.warning -match 'cleanupPeriodDays') -and
+        ($r.Json.warning -match 'never 0') -and ($r.Json.warning -match 'archive-sessions') -and (Same $n.Json.code 'NO_RESUMABLE_SESSION') -and (Same $n.Json.retentionDays 30)
+    }
+    Check 'retention: a large cleanupPeriodDays silences the warning, 0 is not a period, and settings.json is never written' {
+        [IO.File]::WriteAllText($settingsFile, '{"cleanupPeriodDays": 3650, "theme": "dark"}')
+        $before = (Get-FileHash $settingsFile).Hash
+        $r = Invoke-Script 'list-sessions.ps1'
+        foreach ($run in @(@('search-sessions.ps1', '-Query', 'deploy'), @('archive-sessions.ps1', '-All'), @('archive-sessions.ps1', '-List'),
+                @('resume-session.ps1', '-Path', $declined, '-NoPicker', '-AllowUntrusted'))) { Invoke-Script $run[0] @($run | Select-Object -Skip 1) | Out-Null }
+        $large = Get-TranscriptRetention
+        $untouched = (Get-FileHash $settingsFile).Hash -eq $before
+        [IO.File]::WriteAllText($settingsFile, '{"cleanupPeriodDays": 0}')
+        $zero = Get-TranscriptRetention
+        $zeroList = Invoke-Script 'list-sessions.ps1'
+        [IO.File]::WriteAllText($settingsFile, '{"cleanupPeriodDays": 7.0}')
+        $whole = Get-TranscriptRetention
+        [IO.File]::WriteAllText($settingsFile, "{ // settings files are strict JSON`n `"cleanupPeriodDays`": 90 }")
+        $jsonc = Get-TranscriptRetention
+        [IO.File]::WriteAllText($settingsFile, '{"cleanupPeriodDays": 1e20}')
+        $huge = Get-TranscriptRetention
+        [IO.File]::WriteAllText($settingsFile, "`r`n")
+        $blank = Get-TranscriptRetention
+        [IO.File]::WriteAllText($settingsFile, '{}')
+        $none = Get-TranscriptRetention
+        Remove-Item -LiteralPath $settingsFile
+        (Same $r.Json.retentionDays 3650) -and ('warning' -notin $r.Json.PSObject.Properties.Name) -and (Same $large.Source 'settings') -and $untouched -and
+        ($null -eq $zero.Days) -and (Same $zero.Source 'invalid') -and ($null -eq $zeroList.Json.retentionDays) -and ($zeroList.Json.warning -match 'strict JSON') -and
+        (Same $whole.Days 7) -and (Same $whole.Source 'settings') -and (Same $jsonc.Source 'invalid') -and (Same $none.Days 30) -and (Same $none.Source 'default') -and
+        (Same $huge.Source 'invalid') -and (Same $blank.Days 30) -and (Same $blank.Source 'default')
+    }
+    Check 'settings.json is named only by the read-only helper and the warning, and nothing writes it' {
+        $code = @{}   # source without help blocks and comments, as the Structure checks read it
+        foreach ($f in Get-ChildItem -LiteralPath $scripts -Recurse -Filter '*.ps1') {
+            $t = [regex]::Replace([IO.File]::ReadAllText($f.FullName), '(?s)<#.*?#>', '')
+            $code[$f.Name] = ($t -split "`r?`n" | ForEach-Object { $_ -replace '(^|\s)#.*$', '' }) -join "`n"
+        }
+        $named = @($code.Keys | Where-Object { $code[$_] -match 'settings\.json' } | Sort-Object)
+        $writers = @($code.Keys | Where-Object {
+                $code[$_] -match '(Set-Content|Out-File|Add-Content|Clear-Content|WriteAll|AppendAll|Copy-Item|Move-Item|New-Item|Remove-Item|::Move|::Copy|::Create|::Replace)[^\n]*(settingsFile|settings\.json)'
+            })
+        (Same $named @('Core.State.ps1', 'list-sessions.ps1')) -and (Same $writers @())
     }
 
     Write-Host "`nLaunch environment (a stand-in wt records what the tab would get; nothing is launched)"
@@ -309,6 +904,7 @@ Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'claude.exe' -ClaudeArgs 
     }
 
     Write-Host "`nReboot path (sandbox; -Simulate only)"
+    $env:CLAUDE_CODE_BIN = $agentsBad
     $promptFile = Join-Path $sandbox 'prompt.txt'
     [IO.File]::WriteAllText($promptFile, "재부팅 후 이어서: SECRET-MARKER-123`nnext step")
     Check 'reboot-plan: untrusted folder is refused' { Same (Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $declined)).Json.code 'UNTRUSTED_WORKSPACE' }
@@ -344,7 +940,46 @@ Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'claude.exe' -ClaudeArgs 
         $r = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-PromptFile', $empty)
         (Same $r.Json.code 'REBOOT_PLANNED') -and ($r.Json.prompt -ne 'empty')
     }
-    $plan = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-PromptFile', $promptFile, '-DelaySeconds', '5')
+    # The reported cwd is deliberately wrong: only the transcript's recorded cwd counts.
+    $otherDir = New-Item -ItemType Directory -Force -Path (Join-Path $work 'trusted-parent\other ; folder') | ForEach-Object FullName
+    $second = New-Transcript -Cwd $otherDir -Entrypoint 'cli' -When (Get-Date) -Title 'second work'
+    $untrusted = New-Transcript -Cwd $declined -Entrypoint 'cli' -When (Get-Date)
+    $background = [guid]::NewGuid().ToString()
+    $missingTranscript = [guid]::NewGuid().ToString()
+    $missingCwd = New-Transcript -Cwd (Join-Path $work 'vanished') -Entrypoint 'cli' -When (Get-Date)
+    $multiAgents = Join-Path $agentsDir 'multi.cmd'
+    $rows = @(
+        @{ sessionId = $newer; kind = 'interactive' },
+        @{ sessionId = $second; kind = 'interactive'; cwd = $declined },
+        @{ sessionId = $second; kind = 'interactive' },
+        @{ sessionId = $untrusted; kind = 'interactive' },
+        @{ sessionId = $cron; kind = 'interactive' },
+        @{ sessionId = $background; kind = 'background' },
+        @{ sessionId = $missingTranscript; kind = 'interactive' },
+        @{ sessionId = $missingCwd; kind = 'interactive' }
+    )
+    function Set-AgentRows($Rows) { [IO.File]::WriteAllText($multiAgents, "@echo off`r`necho $($Rows | ConvertTo-Json -Compress)`r`n") }
+    Set-AgentRows $rows
+    try {
+        $env:CLAUDE_CODE_BIN = $multiAgents
+        Check 'reboot-plan: only trusted interactive open sessions return, deduplicated and in recorded folders' {
+            $r = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-SessionId', $newer, '-AllowUntrusted')
+            (Same @($r.Json.alsoResume.sessionId) @($second)) -and (Same $r.Json.alsoResume[0].workdir $otherDir) -and
+            (Same $r.Json.alsoResume[0].title 'second work') -and (Same @($r.Json.skipped.sessionId) @($untrusted, $cron, $background, $missingTranscript, $missingCwd))
+        }
+        Check 'reboot-plan -OnlyThis: no other sessions are planned' {
+            $r = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-OnlyThis')
+            (Same @($r.Json.alsoResume) @()) -and (Same @($r.Json.skipped) @())
+        }
+        Check 'reboot-plan: caps other sessions at eight and reports every cut' {
+            $many = @(1..9 | ForEach-Object { @{ sessionId = (New-Transcript -Cwd $otherDir -Entrypoint 'cli' -When (Get-Date)); kind = 'interactive' } })
+            Set-AgentRows $many
+            $r = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain)
+            Set-AgentRows $rows
+            (Same $r.Json.alsoResume.Count 8) -and (Same $r.Json.skipped[0].reason 'LIMIT_REACHED') -and (Same $r.Json.skipped[0].sessionId $many[8].sessionId)
+        }
+        $plan = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-PromptFile', $promptFile, '-DelaySeconds', '5')
+    } finally { $env:CLAUDE_CODE_BIN = $agentsBad }
     Check 'reboot-plan: delay is floored at 30s and the prompt is not echoed' { (Same $plan.Json.delaySeconds 30) -and ($plan.Text -notmatch 'SECRET-MARKER') }
     Check 'reboot-plan: RunOnce targets the frozen copy under the kit home, within 260 chars' {
         ($plan.Json.runOnce.Contains((Join-Path $kitHome 'runtime\resume.ps1'))) -and ($plan.Json.runOnce.Length -le 260) -and ($plan.Json.runOnce -notmatch [regex]::Escape($repo))
@@ -375,6 +1010,26 @@ Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'claude.exe' -ClaudeArgs 
         $r = Invoke-Script 'reboot-commit.ps1' @('-Token', $plan.Json.token, '-Simulate')
         [IO.File]::WriteAllText((Get-KitPath plan), $fresh)
         return $r
+    }
+    foreach ($shape in @('non-array', 'non-UUID', 'missing-dir', 'UNC', 'relative', 'duplicate', 'primary', 'over-cap')) {
+        Check "reboot-commit: forged others ($shape) is PLAN_INVALID without state" {
+            $r = Invoke-ForgedCommit {
+                param($p)
+                $valid = [pscustomobject]@{ session_id = $second; workdir = $otherDir }
+                $p.others = @($valid)
+                switch ($shape) {
+                    'non-array' { $p.others = $valid }
+                    'non-UUID' { $valid.session_id = 'not-a-uuid' }
+                    'missing-dir' { $valid.workdir = Join-Path $work 'absent' }
+                    'UNC' { $valid.workdir = '\\localhost\C$\Windows' }
+                    'relative' { $valid.workdir = '.' }
+                    'duplicate' { $p.others = @($valid, $valid) }
+                    'primary' { $valid.session_id = $p.session_id }
+                    'over-cap' { $p.others = @(1..9 | ForEach-Object { [pscustomobject]@{ session_id = [guid]::NewGuid().ToString(); workdir = $plain } }) }
+                }
+            }
+            (Same $r.Json.code 'PLAN_INVALID') -and -not (Test-Path (Get-KitPath state))
+        }
     }
     $frozenPath = Join-Path $kitHome 'runtime\resume.ps1'
     Check 'reboot-commit: a RunOnce that is not the rendered shape is refused -- another program, a prefix, extra arguments' {
@@ -410,14 +1065,49 @@ Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'claude.exe' -ClaudeArgs 
         $r = Invoke-Script 'reboot-commit.ps1' @('-Token', $plan.Json.token, '-Simulate')
         $state = Get-Content (Get-KitPath state) -Raw | ConvertFrom-Json
         $frozen = Join-Path (Get-KitPath runtime) 'resume.ps1'
-        (Same $r.Json.code 'SIMULATED') -and (Same $state.session_id $newer) -and (Same $state.workdir $plain) -and ($state.prompt -match 'SECRET-MARKER') -and
+        (Same $r.Json.code 'SIMULATED') -and (Same $state.session_id $newer) -and (Same $state.workdir $plain) -and (Same $state.others[0].session_id $second) -and (Same $state.others[0].workdir $otherDir) -and ($state.prompt -match 'SECRET-MARKER') -and
         ((Get-FileHash $frozen).Hash -eq (Get-FileHash (Join-Path $scripts 'resume-after-reboot.ps1')).Hash) -and
         -not (Test-Path (Get-KitPath plan)) -and ((Get-RealRunOnce) -eq $runOnceBefore)
+    }
+    Check 'reboot-plan: pending resume is refused with metadata; -Replace preserves state while planning' {
+        $before = Get-Content (Get-KitPath state) -Raw
+        $r = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain)
+        $replace = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-Replace')
+        Remove-Item -LiteralPath (Get-KitPath plan)
+        (Same $r.Json.code 'RESUME_PENDING') -and (Same $r.Json.ok $false) -and (Same $r.Json.sessionId $newer) -and
+        (Same $r.Json.workdir $plain) -and $r.Json.createdAt -and (Same $replace.Json.code 'REBOOT_PLANNED') -and (Same (Get-Content (Get-KitPath state) -Raw) $before)
+    }
+    Check 'reboot-plan: an empty or partial state.json still reports RESUME_PENDING' {
+        $saved = Get-Content (Get-KitPath state) -Raw
+        try {
+            [IO.File]::WriteAllText((Get-KitPath state), '')
+            $empty = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain)
+            [IO.File]::WriteAllText((Get-KitPath state), '{"session_id":"x"}')
+            $partial = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain)
+        } finally { [IO.File]::WriteAllText((Get-KitPath state), $saved) }
+        (Same $empty.Json.code 'RESUME_PENDING') -and (Same $empty.Json.unreadable $true) -and
+        (Same $partial.Json.code 'RESUME_PENDING') -and (Same $partial.Json.sessionId 'x') -and (Same $partial.Json.unreadable $false)
+    }
+    Check 'reboot-plan: stale handoff (or one dated in the future) is refused; -AllowStalePrompt overrides explicitly' {
+        (Get-Item $promptFile).LastWriteTime = (Get-Date).AddMinutes(-31)
+        try {
+            $r = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-PromptFile', $promptFile, '-Replace')
+            $override = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-PromptFile', $promptFile, '-Replace', '-AllowStalePrompt')
+            Remove-Item -LiteralPath (Get-KitPath plan)
+            (Get-Item $promptFile).LastWriteTime = (Get-Date).AddDays(2)
+            $future = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-PromptFile', $promptFile, '-Replace')
+        } finally { (Get-Item $promptFile).LastWriteTime = Get-Date }
+        (Same $r.Json.code 'PROMPT_STALE') -and (Same $r.Json.ok $false) -and (Same $override.Json.code 'REBOOT_PLANNED') -and (Same $future.Json.code 'PROMPT_STALE')
+    }
+    Check 'reboot-cancel -Status: other session ids and folders, without the handoff' {
+        $r = Invoke-Script 'reboot-cancel.ps1' @('-Status')
+        (Same $r.Json.state.othersCount 1) -and (Same $r.Json.state.others[0].sessionId $second) -and
+        (Same $r.Json.state.others[0].workdir $otherDir) -and ($r.Text -notmatch 'SECRET-MARKER')
     }
     Check 'reboot-commit: a kit home spelled with ".." plans and commits like the canonical one' {
         try {
             $env:CLAUDE_SESSION_KIT_HOME = Join-Path $kitHome '..\kit'
-            $p = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-PromptFile', $promptFile)
+            $p = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-PromptFile', $promptFile, '-Replace')
             $c = Invoke-Script 'reboot-commit.ps1' @('-Token', $p.Json.token, '-Simulate')
         } finally { $env:CLAUDE_SESSION_KIT_HOME = $kitHome }
         (Same $p.Json.code 'REBOOT_PLANNED') -and (Same $c.Json.code 'SIMULATED') -and (Same $c.Json.runOnce $p.Json.runOnce) -and ($c.Json.runOnce -notmatch '\.\.')
@@ -442,8 +1132,8 @@ Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'claude.exe' -ClaudeArgs 
     # --- the resume script, run for real against stand-ins for `claude` -----------------
     $frozen = Join-Path (Get-KitPath runtime) 'resume.ps1'
     $ps51 = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    function Set-ResumeState([string]$WorkDir, [string]$PromptText) {
-        $s = [ordered]@{ session_id = $newer; workdir = $WorkDir; prompt = $PromptText; created_at = (Get-Date).ToString('o') }
+    function Set-ResumeState([string]$WorkDir, [string]$PromptText, [array]$Others = @()) {
+        $s = [ordered]@{ session_id = $newer; workdir = $WorkDir; prompt = $PromptText; others = $Others; created_at = (Get-Date).ToString('o') }
         [IO.File]::WriteAllText((Get-KitPath state), ($s | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
     }
     function Invoke-Resume([string]$HostExe, [string]$ClaudeBin, [string[]]$Extra = @()) {
@@ -451,7 +1141,7 @@ Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'claude.exe' -ClaudeArgs 
             $env:CLAUDE_CODE_BIN = $ClaudeBin
             $out = & $HostExe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $frozen @Extra 2>&1 | Out-String
             return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Text = $out }
-        } finally { $env:CLAUDE_CODE_BIN = $null }
+        } finally { $env:CLAUDE_CODE_BIN = $noClaude }
     }
     $nasty = "finish step 2 `"then & echo pwned> INJECTED.marker & rem `" done`nsecond line with %USERNAME% and `"C:\some dir\`""
 
@@ -473,16 +1163,123 @@ Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'claude.exe' -ClaudeArgs 
         ($handed -ceq $nasty) -and -not (Test-Path (Get-KitPath state)) -and (Test-Path (Get-KitPath stateLast)) -and ($r.Text -notmatch 'pwned')
     }
     # A real executable that records its argv: built with the C# compiler that ships with Windows PowerShell 5.1.
-    $echoExe = Join-Path $sandbox 'echoargs\claude.exe'
+    $echoExe = Join-Path $sandbox 'echo args ; bin\claude.exe'
     if (Test-Path $ps51) {
         New-Item -ItemType Directory -Force -Path (Split-Path $echoExe) | Out-Null
-        $src = 'using System; using System.IO; using System.Text; public static class P { public static int Main(string[] a) { var sb = new StringBuilder(); foreach (var s in a) sb.AppendLine(Convert.ToBase64String(Encoding.UTF8.GetBytes(s))); File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "argv.txt"), sb.ToString()); return 0; } }'
+        $src = 'using System; using System.IO; using System.Text; public static class P { public static int Main(string[] a) { var sb = new StringBuilder(); foreach (var s in a) sb.AppendLine(Convert.ToBase64String(Encoding.UTF8.GetBytes(s))); File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "argv.txt"), sb.ToString()); File.WriteAllText(Path.Combine(Environment.CurrentDirectory, "session-argv.txt"), sb.ToString()); return 0; } }'
         $srcFile = Join-Path (Split-Path $echoExe) 'echoargs.cs'
         [IO.File]::WriteAllText($srcFile, $src)
         try { & $ps51 -NoProfile -NonInteractive -Command "Add-Type -Path '$srcFile' -OutputAssembly '$echoExe' -OutputType ConsoleApplication" 2>&1 | Out-Null } catch {}
     }
     if (Test-Path $echoExe) {
         function Get-EchoedArgs { @(Get-Content (Join-Path (Split-Path $echoExe) 'argv.txt') | Where-Object { $_ } | ForEach-Object { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($_)) }) }
+        $wtStub = Join-Path $sandbox 'wt-recorder.exe'
+        $wtSource = Join-Path $sandbox 'wt-recorder.cs'
+        # The stand-in emulates only wt's known nt arguments and starts the recording claude.
+        [IO.File]::WriteAllText($wtSource, @'
+using System;
+using System.IO;
+using System.Text;
+using System.Diagnostics;
+public static class W {
+    public static int Main(string[] a) {
+        string root = Environment.GetEnvironmentVariable("CLAUDE_SESSION_KIT_HOME");
+        var sb = new StringBuilder();
+        foreach (string s in a) sb.AppendLine(Convert.ToBase64String(Encoding.UTF8.GetBytes(s)));
+        File.AppendAllText(Path.Combine(root, "wt-argv.txt"), sb.ToString());
+        File.AppendAllText(Path.Combine(root, "archive-check.txt"), File.Exists(Path.Combine(root, "state.json")) ? "pending" : "archived");
+        if (a.Length != 9 || a[0] != "-w" || a[1] != "0" || a[2] != "nt" || a[3] != "-d" || a[5] != "--" || a[7] != "--resume") return 9;
+        var p = new ProcessStartInfo(a[6].Replace("\\;", ";"), "--resume " + a[8]);
+        p.WorkingDirectory = a[4].Replace("\\;", ";"); p.UseShellExecute = false;
+        using (var proc = Process.Start(p)) { proc.WaitForExit(); return proc.ExitCode; }
+    }
+}
+'@)
+        & $ps51 -NoProfile -NonInteractive -Command "Add-Type -Path '$wtSource' -OutputAssembly '$wtStub' -OutputType ConsoleApplication" 2>&1 | Out-Null
+        $thirdDir = New-Item -ItemType Directory -Force -Path (Join-Path $work 'trusted-parent\third folder') | ForEach-Object FullName
+        $third = [guid]::NewGuid().ToString()
+        $targets = @(@{ session_id = $second; workdir = $otherDir }, @{ session_id = $third; workdir = $thirdDir })
+        function Read-ArgFile([string]$File) { @(Get-Content -LiteralPath $File | Where-Object { $_ } | ForEach-Object { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($_)) }) }
+        foreach ($resumeHost in @('pwsh', $ps51)) {
+            Check "resume: extra wt tabs round trip without prompts and primary stays intact ($resumeHost)" {
+                Set-ResumeState $plain $nasty $targets
+                $wtLog = Join-Path $kitHome 'wt-argv.txt'; $archiveLog = Join-Path $kitHome 'archive-check.txt'
+                Remove-Item -LiteralPath $wtLog, $archiveLog -ErrorAction SilentlyContinue
+                try {
+                    $env:CLAUDE_SESSION_KIT_WT_BIN = $wtStub
+                    $r = Invoke-Resume $resumeHost $echoExe
+                } finally { $env:CLAUDE_SESSION_KIT_WT_BIN = $null }
+                $a = Read-ArgFile (Join-Path $otherDir 'session-argv.txt'); $b = Read-ArgFile (Join-Path $thirdDir 'session-argv.txt')
+                $primary = Get-EchoedArgs; $wtArgs = Read-ArgFile $wtLog
+                (Same $a @('--resume', $second)) -and (Same $b @('--resume', $third)) -and
+                (Same $primary @('--resume', $newer, '--', $nasty)) -and (Same $wtArgs.Count 18) -and
+                (Same $wtArgs[4] ($otherDir -replace ';', '\;')) -and (Same (Get-Content $archiveLog -Raw) 'archivedarchived') -and
+                -not (Test-Path (Get-KitPath state)) -and ($r.Text -notmatch 'SECRET-MARKER|pwned')
+            }
+        }
+        Check 'resume -DryRun: logs extra targets, skips missing folders, launches nothing and retains state' {
+            $missingId = [guid]::NewGuid().ToString()
+            Set-ResumeState $plain $nasty @($targets[0], @{ session_id = $missingId; workdir = (Join-Path $work 'missing-other') })
+            $wtLog = Join-Path $kitHome 'wt-argv.txt'; Remove-Item -LiteralPath $wtLog -ErrorAction SilentlyContinue
+            try { $env:CLAUDE_SESSION_KIT_WT_BIN = $wtStub; $r = Invoke-Resume 'pwsh' $echoExe @('-DryRun') }
+            finally { $env:CLAUDE_SESSION_KIT_WT_BIN = $null }
+            ($r.Text -match [regex]::Escape($second)) -and ($r.Text -match "Skipping session $missingId") -and
+            -not (Test-Path $wtLog) -and (Test-Path (Get-KitPath state)) -and ($r.Text -notmatch 'pwned')
+        }
+        Check 'resume -DryRun: tampered others are skipped (over the cap, a duplicate, a bad id, the primary, UNC, relative)' {
+            $valid = @(1..9 | ForEach-Object { @{ session_id = [guid]::NewGuid().ToString(); workdir = $otherDir } })
+            $bad = @($valid[0], @{ session_id = 'x" --dangerously-skip-permissions "'; workdir = $otherDir }, @{ session_id = $newer; workdir = $otherDir },
+                @{ session_id = [guid]::NewGuid().ToString(); workdir = '\\server\share\x' }, @{ session_id = [guid]::NewGuid().ToString(); workdir = 'relative\x' })
+            Set-ResumeState $plain $nasty @($valid + $bad)
+            try { $env:CLAUDE_SESSION_KIT_WT_BIN = $wtStub; $r = Invoke-Resume 'pwsh' $echoExe @('-DryRun') }
+            finally { $env:CLAUDE_SESSION_KIT_WT_BIN = $null }
+            $lines = @($r.Text -split "`r?`n")
+            $others = @($lines | Where-Object { $_ -match 'Other session ([0-9a-f-]{36}) :' } | ForEach-Object { ([regex]::Match($_, '[0-9a-f-]{36}')).Value })
+            (Same @($lines | Where-Object { $_ -match 'Skipping invalid other session target' }).Count 6) -and
+            (Same $others @($valid[0..7] | ForEach-Object { $_.session_id })) -and ($r.Text -notmatch 'dangerously') -and (Test-Path (Get-KitPath state))
+        }
+        Check 'resume: vanished other folders are skipped after one shared wait; remaining tabs and primary still open' {
+            $missingId = [guid]::NewGuid().ToString(); $missing2 = [guid]::NewGuid().ToString()
+            Set-ResumeState $plain $nasty @(@{ session_id = $missingId; workdir = (Join-Path $work 'missing-other') }, @{ session_id = $missing2; workdir = (Join-Path $work 'missing-other-2') }, $targets[0])
+            $wtLog = Join-Path $kitHome 'wt-argv.txt'; Remove-Item -LiteralPath $wtLog -ErrorAction SilentlyContinue
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            try { $env:CLAUDE_SESSION_KIT_WT_BIN = $wtStub; $r = Invoke-Resume 'pwsh' $echoExe }
+            finally { $env:CLAUDE_SESSION_KIT_WT_BIN = $null }
+            $sw.Stop()
+            # one 30 s wait for both, not 30 s each
+            ($sw.Elapsed.TotalSeconds -lt 50) -and ($r.Text -match "Skipping session $missing2") -and
+            ($r.Text -match "Skipping session $missingId") -and (Same (Read-ArgFile $wtLog).Count 9) -and
+            (Same (Read-ArgFile (Join-Path $otherDir 'session-argv.txt')) @('--resume', $second)) -and
+            (Same (Get-EchoedArgs) @('--resume', $newer, '--', $nasty)) -and -not (Test-Path (Get-KitPath state))
+        }
+        foreach ($resumeHost in @('pwsh', $ps51)) {
+            # DryRun: a real fallback opens a visible console window, which a test must not.
+            Check "resume: no wt falls back to a console in the recorded folder ($resumeHost, DryRun)" {
+                Set-ResumeState $plain $nasty @($targets[0])
+                try {
+                    $env:CLAUDE_SESSION_KIT_WT_BIN = Join-Path $sandbox 'absent-wt.exe'
+                    $r = Invoke-Resume $resumeHost $echoExe @('-DryRun')
+                } finally { $env:CLAUDE_SESSION_KIT_WT_BIN = $null }
+                $r.Text -match [regex]::Escape("Other session $second : console in $otherDir")
+            }
+        }
+        Check 'resume: run again by hand, a session already open is not opened twice, the primary included (Windows PowerShell 5.1)' {
+            $sessDir = New-Item -ItemType Directory -Force -Path (Join-Path $cfgDir 'sessions') | ForEach-Object FullName
+            $start = (Get-Process -Id $PID).StartTime.ToUniversalTime().ToFileTimeUtc()
+            foreach ($id in $second, $newer) { [IO.File]::WriteAllText((Join-Path $sessDir "$id.json"), (@{ pid = $PID; sessionId = $id; procStart = "$start" } | ConvertTo-Json)) }
+            # decoys for the third: its PID reused by another process, and a record with no start time on a pwsh (not claude/node) PID
+            [IO.File]::WriteAllText((Join-Path $sessDir "$third-reused.json"), (@{ pid = $PID; sessionId = $third; procStart = "$($start + 1)" } | ConvertTo-Json))
+            [IO.File]::WriteAllText((Join-Path $sessDir "$third-undated.json"), (@{ pid = $PID; sessionId = $third } | ConvertTo-Json))
+            $primaryArgv = Join-Path (Split-Path $echoExe) 'argv.txt'; $thirdArgv = Join-Path $thirdDir 'session-argv.txt'; $secondArgv = Join-Path $otherDir 'session-argv.txt'
+            Remove-Item -LiteralPath $primaryArgv, $thirdArgv, $secondArgv -ErrorAction SilentlyContinue
+            Set-ResumeState $plain $nasty $targets
+            try { $env:CLAUDE_SESSION_KIT_WT_BIN = $wtStub; $r = Invoke-Resume $ps51 $echoExe }
+            finally { $env:CLAUDE_SESSION_KIT_WT_BIN = $null; Remove-Item -LiteralPath $sessDir -Recurse -Force }
+            (Same $r.ExitCode 0) -and ($r.Text -match "Skipping session $second : already open") -and ($r.Text -match "Session $newer is already open") -and
+            # Every stand-in launch writes argv.txt; the third tab's being the last means the primary never ran.
+            (Same (Read-ArgFile $thirdArgv) @('--resume', $third)) -and -not (Test-Path $secondArgv) -and
+            (Same (Get-EchoedArgs) @('--resume', $third)) -and -not (Test-Path (Get-KitPath state))
+        }
         Check 'resume: to a real .exe the prompt arrives as ONE intact argument (PowerShell 7)' {
             Set-ResumeState $plain $nasty
             Invoke-Resume 'pwsh' $echoExe | Out-Null
@@ -507,7 +1304,7 @@ Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'claude.exe' -ClaudeArgs 
                 try {
                     $env:CLAUDE_CODE_BIN = $echoExe
                     & pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "`$PSNativeCommandArgumentPassing = 'Legacy'; & '$frozen'" 2>&1 | Out-Null
-                } finally { $env:CLAUDE_CODE_BIN = $null }
+                } finally { $env:CLAUDE_CODE_BIN = $noClaude }
                 $a = Get-EchoedArgs
                 if ($a.Count -ne 4 -or $a[3] -cne $t) { throw "prompt #$([array]::IndexOf($tricky, $t) + 1) arrived as $($a.Count) argument(s)" }
             }
@@ -516,7 +1313,9 @@ Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'claude.exe' -ClaudeArgs 
     } else {
         Skip 'resume: argv round trip through a real .exe' 'could not build the argv-echo helper (needs Windows PowerShell 5.1)'
     }
-    Check "the sandbox's .claude.json was never written" { (Get-FileHash (Join-Path $cfgDir '.claude.json')).Hash -eq $cfgHash }
+    Check "the sandbox's .claude.json was never written, and the real claude never ran against it" {
+        ((Get-FileHash (Join-Path $cfgDir '.claude.json')).Hash -eq $cfgHash) -and -not (Test-Path -LiteralPath (Join-Path $cfgDir 'daemon'))
+    }
 
     Write-Host "`nStructure"
     $all = Get-ChildItem -LiteralPath $scripts -Recurse -Filter *.ps1
@@ -533,14 +1332,21 @@ Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'claude.exe' -ClaudeArgs 
         $hits = @($all | Where-Object { (Code $_) -match '(Set|New)-ItemProperty' } | ForEach-Object Name)
         Same $hits @('reboot-commit.ps1')
     }
-    Check 'reboot-plan.ps1 cannot start a process, and the reboot scripts load no Effects' {
+    Check 'reboot-plan.ps1 opens no terminal, and the reboot scripts load no Effects' {
         $plan = Code (Get-Item (Join-Path $scripts 'reboot-plan.ps1'))
         $lonely = @('reboot-commit.ps1', 'reboot-cancel.ps1', 'resume-after-reboot.ps1') | ForEach-Object { Code (Get-Item (Join-Path $scripts $_)) }
         ($plan -notmatch 'Core\.Effects|Start-Process|Start-ClaudeTerminal|wt\.exe\s') -and -not ($lonely -match 'lib\\Core\.')
     }
-    Check 'only Core.Effects.ps1 starts a terminal' {
+    # The frozen resume script also opens other sessions after logon, without loading lib/.
+    Check 'only Core.Effects.ps1 and resume-after-reboot.ps1 start a terminal' {
         $hits = @($all | Where-Object { (Code $_) -match 'Start-Process|&\s*\$wt\b' } | ForEach-Object Name)
-        Same $hits @('Core.Effects.ps1')
+        Same @($hits | Sort-Object) @('Core.Effects.ps1', 'resume-after-reboot.ps1')
+    }
+    # A .NET start is invisible to the check above: allowed only for the fixed agents query and the frozen resume script.
+    Check 'only Core.State.ps1 (`claude agents --json`, nothing else) and resume-after-reboot.ps1 start a process through .NET' {
+        $hits = @($all | Where-Object { (Code $_) -match 'Process\]::Start|ProcessStartInfo' } | ForEach-Object Name)
+        $added = @([regex]::Matches((Code (Get-Item (Join-Path $scripts 'lib\Core.State.ps1'))), 'ArgumentList\.Add\(([^)]*)\)') | ForEach-Object { $_.Groups[1].Value })
+        (Same @($hits | Sort-Object) @('Core.State.ps1', 'resume-after-reboot.ps1')) -and (Same $added @("'agents'", "'--json'"))
     }
     Check '`claude --continue` is never emitted' { -not ($all | Where-Object { (Code $_) -match "['""]--continue['""]|['""]-c['""]" }) }
     Check 'nothing writes ~/.claude.json or names hasTrustDialogAccepted outside the read-only check' {

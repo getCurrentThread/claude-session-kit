@@ -56,8 +56,9 @@ function Wait-BeforeClose {
 
 Write-Log "resume-after-reboot started (DryRun=$([bool]$DryRun))"
 
-if (-not (Test-Path -LiteralPath $stateFile)) {
-    # One release of grace for a reboot scheduled by the older standalone skill.
+if (-not (Test-Path -LiteralPath $stateFile) -and -not $env:CLAUDE_SESSION_KIT_HOME) {
+    # One release of grace for a reboot scheduled by the older standalone skill, which
+    # never knew CLAUDE_SESSION_KIT_HOME (set, it is a test sandbox).
     $legacy = Join-Path $env:USERPROFILE '.claude\reboot-continue\state.json'
     if (Test-Path -LiteralPath $legacy) { $stateFile = $legacy }
 }
@@ -162,7 +163,89 @@ Write-Log "session : $sessionDesc"
 Write-Log "claude  : $claude"
 Write-Log "prompt  : $($prompt.Length) chars, delivered by $delivery"
 
+# Use the same Win32 quoting on every host; wt also treats semicolons as separators.
+function ConvertTo-NativeArgument([string]$Value) {
+    $escaped = $Value -replace '(\\*)"', '$1$1\"'
+    return '"' + ($escaped -replace '(\\+)\z', '$1$1') + '"'
+}
+# A rerun by hand (the folder came back later, see above) must not open a session a
+# second time. The CLI keeps <config>\sessions\<pid>.json for each live one: the same
+# rule as Get-RunningSessions in lib/, without asking `claude agents`.
+function Test-SessionRunning([string]$Id) {
+    $cfg = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }
+    foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $cfg 'sessions') -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
+        try {
+            $r = Get-Content -LiteralPath $f.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ([string]$r.sessionId -ne $Id -or -not $r.pid) { continue }
+            $proc = Get-Process -Id ([int]$r.pid) -ErrorAction Stop
+            $started = $null
+            try { $started = $proc.StartTime.ToUniversalTime().ToFileTimeUtc() } catch {}
+            if ($r.procStart -and $null -ne $started) { if ($started -eq [long]$r.procStart) { return $true } }
+            elseif ($proc.ProcessName -in 'claude', 'node') { return $true }
+        } catch {}
+    }
+    return $false
+}
+function Open-OtherSessions {
+    $wt = $null
+    # Narrow executable override for hermetic resume tests, like CLAUDE_CODE_BIN.
+    if ($env:CLAUDE_SESSION_KIT_WT_BIN) {
+        if (Test-Path -LiteralPath $env:CLAUDE_SESSION_KIT_WT_BIN -PathType Leaf) { $wt = $env:CLAUDE_SESSION_KIT_WT_BIN }
+    } else {
+        $alias = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\wt.exe'
+        if (Test-Path -LiteralPath $alias -PathType Leaf) { $wt = $alias }
+        else {
+            $cmd = Get-Command wt.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($cmd) { $wt = $cmd.Source }
+        }
+    }
+    $seen = @{}; $count = 0
+    # One wait for all of them: the primary, which carries the handoff, opens after this loop.
+    # A stopwatch, not the clock: time sync can step the clock back right after logon.
+    $waited = [System.Diagnostics.Stopwatch]::StartNew()
+    foreach ($other in @($state.others)) {
+        if (-not $other) { continue }
+        $id = [string]$other.session_id; $dir = [string]$other.workdir
+        if ($id -notmatch $uuid -or $id -ieq $sessionId -or $seen.ContainsKey($id) -or $count -ge 8 -or $dir -notmatch '\A[A-Za-z]:[\\/]') {
+            Write-Log 'Skipping invalid other session target.'; continue
+        }
+        $seen[$id] = $true; $count++
+        $exists = Test-Path -LiteralPath $dir -PathType Container
+        if (-not $exists -and -not $DryRun) { Write-Log "Waiting for $dir ..." }
+        while (-not $exists -and -not $DryRun -and $waited.Elapsed.TotalSeconds -lt 30) {
+            Start-Sleep -Seconds 3
+            $exists = Test-Path -LiteralPath $dir -PathType Container
+        }
+        if (-not $exists) { Write-Log "Skipping session $id : saved workdir '$dir' not found."; continue }
+        if (Test-SessionRunning $id) { Write-Log "Skipping session $id : already open in another terminal."; continue }
+        $launcher = if ($wt) { 'wt tab' } else { 'console' }
+        Write-Log "Other session $id : $launcher in $dir (no prompt)."
+        if ($DryRun) { continue }
+        try {
+            if ($wt) {
+                $wtArgs = @('-w', '0', 'nt', '-d', ($dir -replace ';', '\;'), '--', ($claude -replace ';', '\;'), '--resume', $id)
+                $psi = New-Object System.Diagnostics.ProcessStartInfo
+                $psi.FileName = $wt
+                $psi.Arguments = (@($wtArgs | ForEach-Object { ConvertTo-NativeArgument $_ }) -join ' ')
+                $psi.UseShellExecute = $false
+                $psi.WorkingDirectory = $dir
+                $proc = [System.Diagnostics.Process]::Start($psi)
+                $proc.WaitForExit()
+                $proc.Dispose()
+            } else {
+                # Escaped: -WorkingDirectory reads [ ] as wildcards and would not find the folder.
+                Start-Process -FilePath $claude -ArgumentList @('--resume', $id) -WorkingDirectory ([WildcardPattern]::Escape($dir))
+            }
+        } catch { Write-Log "Could not reopen other session $id : $($_.Exception.Message)" }
+    }
+}
+
+# Only a rerun by hand can find it open: right after the reboot nothing is.
+$primaryOpen = ($sessionId -match $uuid) -and (Test-SessionRunning $sessionId)
+if ($primaryOpen) { Write-Log "Session $sessionId is already open in another terminal; it is not opened a second time." }
+
 if ($DryRun) {
+    Open-OtherSessions
     Write-Log 'DryRun: not launching. State file left in place.'
     exit 0
 }
@@ -173,6 +256,9 @@ if ($delivery -eq 'file') {
 
 # Archive the state FIRST, so a relaunch that crashes can never loop.
 Move-Item -LiteralPath $stateFile -Destination (Join-Path (Split-Path -Parent $stateFile) 'state.last.json') -Force
+
+Open-OtherSessions
+if ($primaryOpen) { Wait-BeforeClose; exit 0 }
 
 Start-Sleep -Seconds 3
 if ($ownCommandLine) {

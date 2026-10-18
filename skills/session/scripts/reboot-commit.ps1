@@ -92,6 +92,20 @@ try {
     $resumeSource  = Join-Path $PSScriptRoot 'resume-after-reboot.ps1'
     $runtimeScript = [IO.Path]::GetFullPath((Join-Path $kitRoot 'runtime\resume.ps1'))
     $invalid = { param($why) Out-Result ([ordered]@{ ok = $false; code = 'PLAN_INVALID'; message = "$why Nothing was registered. Run reboot-plan.ps1 again." }) 1 }
+    # Refuse malformed extra targets before freezing, writing state or registering anything.
+    if ($plan.others -isnot [array] -or $plan.others.Count -gt 8) { & $invalid 'The other sessions must be an array of at most eight targets.' }
+    $others = @(); $seen = @{}
+    foreach ($other in $plan.others) {
+        if ($other -isnot [pscustomobject] -or $other.session_id -isnot [string] -or
+            $other.session_id -notmatch '\A[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\z' -or
+            $other.workdir -isnot [string] -or $other.workdir -notmatch '\A[A-Za-z]:[\\/]' -or
+            -not (Test-Path -LiteralPath $other.workdir -PathType Container)) { & $invalid 'An other session has an invalid id or local working directory.' }
+        if ($other.session_id -ieq [string]$plan.session_id -or $seen.ContainsKey($other.session_id)) { & $invalid 'The other sessions contain a duplicate or the primary session.' }
+        $folder = Get-Item -LiteralPath $other.workdir -Force
+        if ($folder.FullName -notmatch '\A[A-Za-z]:[\\/]') { & $invalid 'An other session resolves to a nonlocal folder.' }
+        $seen[$other.session_id] = $true
+        $others += [ordered]@{ session_id = $other.session_id; workdir = $folder.FullName }
+    }
     if (-not (Test-Path -LiteralPath $resumeSource -PathType Leaf)) { & $invalid 'resume-after-reboot.ps1 is missing next to reboot-commit.ps1.' }
     if ([IO.Path]::GetFullPath([string]$plan.runtime_script) -ine $runtimeScript) { & $invalid 'The plan does not point at the frozen resume script in the state folder.' }
 
@@ -133,6 +147,7 @@ try {
         session_id = [string]$plan.session_id
         workdir    = [string]$plan.workdir
         prompt     = [string]$plan.prompt
+        others     = @($others)
         created_at = (Get-Date).ToString('o')
     }
     [IO.File]::WriteAllText($stateFile, ($state | ConvertTo-Json -Depth 4), $utf8)
@@ -149,7 +164,9 @@ try {
     Write-Log ("reboot-commit registered session={0} cwd={1}" -f $plan.session_id, $plan.workdir)
 
     if ($plan.no_reboot) {
-        Out-Result ([ordered]@{ ok = $true; code = 'RESUME_REGISTERED'; workdir = [string]$plan.workdir; sessionId = [string]$plan.session_id; runOnce = $runOnce; message = 'Registered. No reboot was scheduled; the session resumes at the next logon after a manual restart.' }) 0
+        $message = 'Registered. No reboot was scheduled; the session resumes at the next logon after a manual restart.'
+        if ($others.Count) { $message += ' The other sessions listed at plan time reopen then too, even if they are closed in the meantime.' }
+        Out-Result ([ordered]@{ ok = $true; code = 'RESUME_REGISTERED'; workdir = [string]$plan.workdir; sessionId = [string]$plan.session_id; runOnce = $runOnce; message = $message }) 0
     }
 
     # 4. the reboot
