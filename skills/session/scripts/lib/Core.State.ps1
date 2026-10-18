@@ -448,20 +448,34 @@ function Get-ClaudeSessions {
 # file: it holds the person's permissions, hooks and environment.
 # shortcut: the user's own settings.json only; managed policy or project settings can set a
 # lower value that wins. Read managed-settings.json too if that turns out to bite.
+# Source: settings | default (no file or no key) | invalid (Days $null: the file is not strict
+# JSON or the value is not a whole number of 1 or more -- the CLI reports a settings error then).
 function Get-TranscriptRetention {
     $settingsFile = Join-Path (Get-ClaudeHome) 'settings.json'
+    $default = [pscustomobject]@{ Days = 30; Source = 'default' }
+    $invalid = [pscustomobject]@{ Days = $null; Source = 'invalid' }
+    $raw = $null
+    try { $raw = [IO.File]::ReadAllText($settingsFile) } catch {}
+    # the CLI loads a blank file as empty settings
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $default }
     try {
-        $settings = Get-Content -LiteralPath $settingsFile -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -AsHashtable
-        $days = if ($settings -is [System.Collections.IDictionary]) { $settings['cleanupPeriodDays'] } else { $null }
-        # 0 or less is no retention period (the CLI rejects it since v2.1.89): report the default
-        if (($days -is [int] -or $days -is [long]) -and $days -gt 0) { return [pscustomobject]@{ Days = [long]$days; Source = 'settings' } }
-    } catch {}
-    return [pscustomobject]@{ Days = 30; Source = 'default' }
+        # Settings files are strict JSON; ConvertFrom-Json alone also takes comments and trailing commas.
+        ([Text.Json.JsonDocument]::Parse($raw)).Dispose()
+        $settings = $raw | ConvertFrom-Json -AsHashtable
+    } catch { return $invalid }
+    if ($settings -isnot [System.Collections.IDictionary] -or -not $settings.Contains('cleanupPeriodDays')) { return $default }
+    $days = $settings['cleanupPeriodDays']
+    # 7.0 parses as a double here and as 7 in the CLI; 0 is rejected since v2.1.89, and so is
+    # anything past 2^53 - 1 (the CLI's safe-integer limit; it would overflow [long] as a double)
+    if (($days -is [int] -or $days -is [long] -or $days -is [double] -or $days -is [decimal]) -and $days -ge 1 -and $days -le 9007199254740991 -and [math]::Floor($days) -eq $days) {
+        return [pscustomobject]@{ Days = [long]$days; Source = 'settings' }
+    }
+    return $invalid
 }
 
 # --- running sessions (READ ONLY) ------------------------------------------------------------
 # Which conversations are open right now. `claude agents --json` is the documented
-# answer (Claude Code 2.1.139+) and the only process this file starts: a read-only
+# answer (Claude Code 2.1.145+) and the only process this file starts: a read-only
 # query with fixed arguments. When it is missing or fails, the CLI's own per-process
 # records (<claude home>\sessions\<pid>.json) are read instead, and one counts only
 # while that PID is alive AND was started at the recorded time (or, with no start time
@@ -486,6 +500,8 @@ function Get-RunningSessions {
                         [pscustomobject]@{
                             SessionId = [string]$r['sessionId']; Pid = $r['pid']; Kind = [string]$r['kind']; Cwd = [string]$r['cwd']
                             Name = [string]$r['name']; Status = [string]$(if ($r['status']) { $r['status'] } else { $r['state'] }); Source = 'agents'
+                            # a background row's short job id: what `claude attach` takes (a sessionId it does not)
+                            JobId = [string]$r['id']
                         }
                     })
             } else {
@@ -510,8 +526,9 @@ function Get-RunningSessions {
         if ($r['procStart'] -and $null -ne $started) { if ($started -ne [long]$r['procStart']) { continue } }
         elseif ($proc.ProcessName -notin 'claude', 'node') { continue }
         [pscustomobject]@{
-            SessionId = [string]$r['sessionId']; Pid = [int]$r['pid']; Kind = [string]$r['kind']; Cwd = [string]$r['cwd']
-            Name = [string]$r['name']; Status = [string]$r['status']; Source = 'pidfile'
+            # these records spell a background session 'bg'; `claude agents --json` says 'background'
+            SessionId = [string]$r['sessionId']; Pid = [int]$r['pid']; Kind = $(if ($r['kind'] -eq 'bg') { 'background' } else { [string]$r['kind'] }); Cwd = [string]$r['cwd']
+            Name = [string]$r['name']; Status = [string]$r['status']; Source = 'pidfile'; JobId = ''
         }
     }
 }
@@ -572,6 +589,8 @@ function Get-StartPermissionMode {
         if ($a -ceq '--permission-mode' -and $i + 1 -lt $argv.Count) { $mode = $argv[++$i] }
         elseif ($a.StartsWith('--permission-mode=', [StringComparison]::Ordinal)) { $mode = $a.Substring(18) }
     }
+    # 'default' is Manual mode's config value: record the name --permission-mode lists for it
+    if ($mode -ceq 'default') { return 'manual' }
     if ($mode -and $mode -cmatch '\A[A-Za-z]{1,32}\z') { return $mode }
     return $null
 }
@@ -632,24 +651,39 @@ function Get-OpenSessionRecords {
 # The folder a session is reopened in is always the one RECORDED for it:
 # `claude --resume <id>` finds a session from anywhere, and then works in whatever
 # directory it was started from.
+# A session's transcript in whichever project folder holds it: /cd, EnterWorktree and
+# ExitWorktree move it to another folder's slug. $null when there is none.
+function Find-SessionTranscript {
+    param([Parameter(Mandatory)][string]$SessionId)
+    if (-not (Test-SessionIdFormat $SessionId)) { return $null }
+    foreach ($d in @(Get-ChildItem -LiteralPath (Get-ClaudeProjectsDir) -Directory -ErrorAction SilentlyContinue)) {
+        $candidate = Join-Path $d.FullName ($SessionId + '.jsonl')
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+    return $null
+}
+
+# -RunningSessions (Get-RunningSessions rows) are skipped by the automatic steps: the
+# newest session in a folder is usually the one asking, and an open one cannot be
+# reopened anyway. An explicit -SessionId is not skipped; the launch refuses it.
+# -IncludeOpen skips nothing: a fork of an open session is a new conversation.
 function Resolve-ResumeTarget {
     param(
         [string]$Path,
         [string]$SessionId,
         [int]$Days = 30,
         [switch]$AllowPicker,
-        [switch]$AllowSidecar
+        [switch]$AllowSidecar,
+        [object[]]$RunningSessions = @(),
+        [switch]$IncludeOpen
     )
     $none = { param($reason) [pscustomobject]@{ Mode = 'none'; SessionId = $null; Cwd = $Path; Source = $null; Title = $null; Reason = $reason } }
     $kinds = if ($AllowSidecar) { @('interactive', 'sidecar') } else { @('interactive') }
 
     if ($SessionId) {
         if (-not (Test-SessionIdFormat $SessionId)) { return (& $none "Not a session id: $SessionId") }
-        $found = $null
-        foreach ($d in @(Get-ChildItem -LiteralPath (Get-ClaudeProjectsDir) -Directory -ErrorAction SilentlyContinue)) {
-            $candidate = Join-Path $d.FullName ($SessionId + '.jsonl')
-            if (Test-Path -LiteralPath $candidate) { $found = Get-ClaudeSessionRecord -TranscriptPath $candidate; break }
-        }
+        $candidate = Find-SessionTranscript -SessionId $SessionId
+        $found = if ($candidate) { Get-ClaudeSessionRecord -TranscriptPath $candidate }
         if (-not $found) { return (& $none "No transcript exists for session $SessionId.") }
         if ($found.Kind -notin $kinds) { return (& $none "Session $SessionId is '$($found.Kind)', not an interactive CLI session.") }
         $cwd = if ($found.Cwd) { $found.Cwd } else { $Path }
@@ -657,9 +691,18 @@ function Resolve-ResumeTarget {
         return [pscustomobject]@{ Mode = 'resume-id'; SessionId = $SessionId; Cwd = $cwd; Source = 'explicit'; Title = $found.Title; Reason = $null }
     }
 
+    $open = @{}
+    if (-not $IncludeOpen) {
+        foreach ($o in @($RunningSessions)) { if ($o -and $o.SessionId) { $open[[string]$o.SessionId] = $true } }
+        # The asking session is open whatever the CLI could tell us.
+        foreach ($v in $env:CLAUDE_CODE_SESSION_ID, $env:CLAUDE_SESSION_ID) { if ($v) { $open[$v] = $true } }
+    }
+    $skipped = [System.Collections.Generic.HashSet[string]]::new()
+
     $best = $null
     foreach ($r in @(Get-RegisteredSessions -Days $Days)) {
         if ($Path -and -not (Test-PathEqual $r.Cwd $Path)) { continue }
+        if ($open.ContainsKey($r.SessionId)) { [void]$skipped.Add($r.SessionId); continue }
         $t = Join-Path (Get-ProjectTranscriptDir $r.Cwd) ($r.SessionId + '.jsonl')
         # Registered but never written: the person closed it before saying anything.
         if (-not (Test-Path -LiteralPath $t)) { continue }
@@ -675,6 +718,7 @@ function Resolve-ResumeTarget {
 
     $scanned = @(Get-ClaudeSessions -Path $Path -Days $Days -Kinds $kinds)
     foreach ($s in $scanned) {
+        if ($open.ContainsKey($s.SessionId)) { [void]$skipped.Add($s.SessionId); continue }
         $cwd = if ($s.Cwd) { $s.Cwd } else { $Path }
         if (-not $cwd) { continue }
         return [pscustomobject]@{ Mode = 'resume-id'; SessionId = $s.SessionId; Cwd = $cwd; Source = 'scan'; Title = $s.Title; Reason = $null }
@@ -683,6 +727,9 @@ function Resolve-ResumeTarget {
     if ($AllowPicker -and $Path) {
         return [pscustomobject]@{ Mode = 'picker'; SessionId = $null; Cwd = $Path; Source = 'picker'; Title = $null
             Reason = "No registered or recent session for this folder; handing over to the CLI's own picker." }
+    }
+    if ($skipped.Count) {
+        return (& $none "No closed interactive session found in the last $Days days; $($skipped.Count) open right now (this one counts) were skipped.")
     }
     return (& $none "No resumable interactive session found in the last $Days days.")
 }

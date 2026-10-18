@@ -164,7 +164,9 @@ try {
     Write-Log ("reboot-commit registered session={0} cwd={1}" -f $plan.session_id, $plan.workdir)
 
     if ($plan.no_reboot) {
-        Out-Result ([ordered]@{ ok = $true; code = 'RESUME_REGISTERED'; workdir = [string]$plan.workdir; sessionId = [string]$plan.session_id; runOnce = $runOnce; message = 'Registered. No reboot was scheduled; the session resumes at the next logon after a manual restart.' }) 0
+        $message = 'Registered. No reboot was scheduled; the session resumes at the next logon after a manual restart.'
+        if ($others.Count) { $message += ' The other sessions listed at plan time reopen then too, even if they are closed in the meantime.' }
+        Out-Result ([ordered]@{ ok = $true; code = 'RESUME_REGISTERED'; workdir = [string]$plan.workdir; sessionId = [string]$plan.session_id; runOnce = $runOnce; message = $message }) 0
     }
 
     # 4. the reboot

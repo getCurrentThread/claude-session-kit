@@ -67,7 +67,8 @@ function Test-PathEqual {
 # ai-title, else the first prompt the person typed. Title records are read from the
 # head AND from -TailLines, the end of the file: the CLI appends them again as the
 # session goes on, so a /rename made hours in is found there. Classification reads
-# the head only.
+# the head only. The folder is the last "relocated" record's (/cd and worktree moves
+# append one, in the tail like the titles), else the first cwd -- the CLI's own rule.
 function Get-TranscriptHeadInfo {
     param([string[]]$Lines, [string[]]$TailLines = @())
 
@@ -82,22 +83,26 @@ function Get-TranscriptHeadInfo {
         if (-not $sessionId -and $line -match '"sessionId"\s*:\s*"([^"]+)"') { $sessionId = $Matches[1] }
         if (-not $prompt -and $line -match '"type"\s*:\s*"user"') {
             $text = Get-MessageText -Line $line -Roles user
-            # '<' opens the CLI's own wrappers (<command-name>, ...) and this its Esc marker: neither is a prompt
-            if ($text -and -not $text.TrimStart().StartsWith('<') -and -not $text.StartsWith('[Request interrupted by user')) {
+            # '<' opens the CLI's own wrappers (<command-name>, ...) and this its Esc marker: neither is a prompt.
+            # A record marked typed is what the person typed, '<' or not; the wrappers carry no promptSource.
+            $typed = $line -match '"promptSource"\s*:\s*"typed"'
+            if ($text -and ($typed -or -not $text.TrimStart().StartsWith('<')) -and -not $text.StartsWith('[Request interrupted by user')) {
                 $prompt = ConvertTo-OneLine -Text $text -Max 80
             }
         }
     }
 
-    $custom = $null; $ai = $null
+    $custom = $null; $ai = $null; $relocated = $null
     foreach ($line in @($Lines) + @($TailLines)) {
-        if (-not $line -or $line -notmatch '"type"\s*:\s*"(?:ai|custom)-title"') { continue }
+        if (-not $line -or $line -notmatch '"type"\s*:\s*"(?:ai-title|custom-title|relocated)"') { continue }
         try { $r = $line | ConvertFrom-Json -AsHashtable } catch { continue }   # cut off at the tail window's edge
         if ($r -isnot [System.Collections.IDictionary]) { continue }
         # later records supersede earlier ones
         if ($r['type'] -eq 'custom-title') { $custom = [string]$r['customTitle'] }
         elseif ($r['type'] -eq 'ai-title') { $ai = [string]$r['aiTitle'] }
+        elseif ($r['type'] -eq 'relocated' -and $r['relocatedCwd']) { $relocated = [string]$r['relocatedCwd'] }
     }
+    if ($relocated) { $cwd = $relocated }
     $title, $titleSource =
         if ($custom) { $custom, 'custom' }
         elseif ($ai) { $ai, 'ai' }
@@ -187,7 +192,9 @@ function Get-ClaudeArgs {
         [string]$Prompt,
         [string]$Name,
         [string]$PermissionMode,
-        [switch]$Fork
+        [switch]$Fork,
+        # the id the fork is created under (the CLI takes --session-id with --resume only alongside --fork-session)
+        [string]$ForkSessionId
     )
 
     $argv = [System.Collections.Generic.List[string]]::new()
@@ -209,11 +216,18 @@ function Get-ClaudeArgs {
         'resume' {
             if (-not (Test-SessionIdFormat $SessionId)) { throw "Mode 'resume' needs a session id, got: '$SessionId'" }
             $argv.Add('--resume'); $argv.Add($SessionId)
-            if ($Fork) { $argv.Add('--fork-session') }
+            if ($Fork) {
+                $argv.Add('--fork-session')
+                if ($ForkSessionId) {
+                    if (-not (Test-SessionIdFormat $ForkSessionId)) { throw "Not a session id: $ForkSessionId" }
+                    $argv.Add('--session-id'); $argv.Add($ForkSessionId)
+                }
+            }
         }
         'picker' {
             if ($Prompt) { throw "Mode 'picker' cannot carry a prompt." }
             $argv.Add('--resume')
+            if ($Fork) { $argv.Add('--fork-session') }
         }
     }
     if ($Prompt) {

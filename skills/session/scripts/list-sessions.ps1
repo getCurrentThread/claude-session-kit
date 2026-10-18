@@ -9,7 +9,7 @@
   transcripts never appear. Message bodies are never read out, with one exception:
   a session the CLI recorded no title for is titled by the start of its first
   prompt (titleSource "prompt"; the others are "custom" for /rename or --name, and
-  "ai"). A registered name stands in until the transcript records a title.
+  "ai"). A registered name stands in until the transcript records a custom title.
 
   retentionDays is how long Claude Code keeps transcripts (cleanupPeriodDays); at 30
   or less, `warning` says how to keep older ones.
@@ -77,7 +77,11 @@ try {
     $result = [ordered]@{ ok = $true; code = 'SESSIONS'; scope = $scope; days = $Days; total = $rows.Count; sessions = $sorted }
     $retention = Get-TranscriptRetention
     $result.retentionDays = $retention.Days
-    if ($retention.Days -le 30) {
+    # first: $null -le 30 is true
+    if ($retention.Source -eq 'invalid') {
+        $result.warning = ('cleanupPeriodDays in {0} is not a whole number of 1 or more, or the file is not strict JSON (no comments or trailing commas). ' +
+            'Claude Code reports a settings error until it is fixed; use a large whole number such as 3650.') -f (Join-Path (Get-ClaudeHome) 'settings.json')
+    } elseif ($retention.Days -le 30) {
         $result.warning = ("Claude Code deletes transcripts older than {0} days, and a deleted session can no longer be listed, searched or resumed. " +
             "To keep them, raise cleanupPeriodDays in {1} to a large value such as 3650 (never 0: rejected since v2.1.89, and older versions took it as 'save no transcripts'), " +
             'or back them up with archive-sessions.ps1.') -f $retention.Days, (Join-Path (Get-ClaudeHome) 'settings.json')

@@ -53,8 +53,11 @@ try {
     Initialize-KitState | Out-Null
 
     if ((Test-Path -LiteralPath (Get-KitPath state)) -and -not $Replace) {
-        $pending = Get-Content -LiteralPath (Get-KitPath state) -Raw -Encoding UTF8 | ConvertFrom-Json
-        Exit-WithResult ([ordered]@{ ok = $false; code = 'RESUME_PENDING'; sessionId = [string]$pending.session_id; workdir = [string]$pending.workdir; createdAt = $pending.created_at; message = 'A resume is already pending. Use -Replace to plan over it.' })
+        # Read like reboot-cancel does: an empty or partial file is still a pending resume.
+        $pending = $null
+        try { $pending = Get-Content -LiteralPath (Get-KitPath state) -Raw -Encoding UTF8 | ConvertFrom-Json } catch {}
+        $field = { param($n) if ($pending -and $pending.PSObject.Properties[$n]) { $pending.$n } }
+        Exit-WithResult ([ordered]@{ ok = $false; code = 'RESUME_PENDING'; sessionId = [string](& $field 'session_id'); workdir = [string](& $field 'workdir'); createdAt = (& $field 'created_at'); unreadable = ($null -eq $pending); message = 'A resume is already pending. Use -Replace to plan over it.' })
     }
 
     if (-not $WorkDir) { $WorkDir = (Get-Location).Path }
@@ -68,8 +71,10 @@ try {
         if (-not (Test-Path -LiteralPath $PromptFile -PathType Leaf)) {
             Exit-WithResult ([ordered]@{ ok = $false; code = 'PROMPT_NOT_FOUND'; path = $PromptFile; message = 'The prompt file does not exist. Nothing was planned.' })
         }
-        if (-not $AllowStalePrompt -and (Get-Item -LiteralPath $PromptFile).LastWriteTime -lt (Get-Date).AddMinutes(-30)) {
-            Exit-WithResult ([ordered]@{ ok = $false; code = 'PROMPT_STALE'; path = $PromptFile; message = 'The prompt file is more than 30 minutes old. Rewrite the handoff or use -AllowStalePrompt.' })
+        # UTC, and bounded on both sides: a file dated in the future would stay "fresh" until then.
+        $age = [DateTime]::UtcNow - (Get-Item -LiteralPath $PromptFile).LastWriteTimeUtc
+        if (-not $AllowStalePrompt -and ($age.TotalMinutes -gt 30 -or $age.TotalMinutes -lt -5)) {
+            Exit-WithResult ([ordered]@{ ok = $false; code = 'PROMPT_STALE'; path = $PromptFile; message = 'The prompt file is more than 30 minutes old (or dated in the future). Rewrite the handoff or use -AllowStalePrompt.' })
         }
         # -Raw yields nothing at all for a zero-byte file; interpolation turns that into ''.
         $Prompt = "$(Get-Content -LiteralPath $PromptFile -Raw -Encoding UTF8)".Trim()

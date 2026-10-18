@@ -16,7 +16,9 @@
 
   SessionEnd runs within Claude Code's 1.5 s budget for plugin hooks, which a plugin
   cannot raise. A pwsh too slow to start in time leaves the record, and the session
-  is offered by restore-open.ps1 until it is forgotten there.
+  is offered by restore-open.ps1 until it is forgotten there. Ending a session within
+  a fraction of a second of its start or a compact can do the same: the async
+  SessionStart may write after the SessionEnd delete.
 
   The one script here that prints NOTHING: it runs inside somebody's session, and
   SessionStart stdout is added to the model's context. It always exits 0, and an error

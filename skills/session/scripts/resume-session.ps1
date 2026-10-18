@@ -11,7 +11,9 @@
     4. the CLI's own picker, opened in the folder (needs -Alias or -Path)
 
   With -Alias or -Path the search is limited to that folder; without either it
-  spans every folder, and step 4 is unavailable.
+  spans every folder, and step 4 is unavailable. Steps 2 and 3 skip sessions that
+  are open right now, the asking one included (not with -Fork); an explicit
+  -SessionId that is open is refused with ALREADY_RUNNING.
 
   The tab always opens in the folder RECORDED for the session. Scheduled and SDK
   transcripts are never candidates, and `claude --continue` is never used.
@@ -28,6 +30,8 @@
 .PARAMETER Fork
   Resume into a copy (--fork-session) and leave the original untouched. Not the
   default: a silent fork makes "the latest session" point at the copy next time.
+  The copy gets a new id (sessionId; forkedFrom names the original) and is recorded
+  like any launch -- except a fork from the CLI's picker, whose id only the CLI knows.
 #>
 [CmdletBinding()]
 param(
@@ -64,7 +68,10 @@ try {
         }
     }
 
-    $target = Resolve-ResumeTarget -Path $scope -SessionId $SessionId -Days $Days -AllowPicker:(-not $NoPicker)
+    # Asked once: the ladder skips open sessions, and the launch refuses one. A fork
+    # skips nothing: forking an open session is what -Fork is for.
+    $running = @(Get-RunningSessions)
+    $target = Resolve-ResumeTarget -Path $scope -SessionId $SessionId -Days $Days -AllowPicker:(-not $NoPicker) -RunningSessions $running -IncludeOpen:$Fork
     if ($target.Mode -eq 'none') {
         Exit-WithResult ([ordered]@{ ok = $false; code = 'NO_RESUMABLE_SESSION'; path = $scope; alias = $aliasName; retentionDays = (Get-TranscriptRetention).Days; message = $target.Reason })
     }
@@ -80,7 +87,7 @@ try {
     $recorded = if ($target.SessionId) { @(Get-OpenSessionRecords) | Where-Object { $_.SessionId -eq $target.SessionId } | Select-Object -First 1 }
     $startMode = if ($recorded -and $recorded.PermissionMode) { $recorded.PermissionMode } else { $null }
     $replay = if ($startMode -cin $script:ReplayablePermissionModes) { $startMode } else { $null }
-    $result = Invoke-SessionLaunch -WorkDir $workDir -Mode $mode -SessionId $target.SessionId -Alias $aliasName -Source resume -PermissionMode $replay -Fork:$Fork -AllowUntrusted:$AllowUntrusted
+    $result = Invoke-SessionLaunch -WorkDir $workDir -Mode $mode -SessionId $target.SessionId -Alias $aliasName -Source resume -PermissionMode $replay -Fork:$Fork -AllowUntrusted:$AllowUntrusted -RunningSessions $running
     $result['chosenFrom'] = $target.Source
     if ($target.Title) { $result['title'] = $target.Title }
     if ($replay) { $result['permissionMode'] = $replay }

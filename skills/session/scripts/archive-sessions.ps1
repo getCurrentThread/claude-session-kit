@@ -8,6 +8,8 @@
   copies them to <kit state>\archive\<project slug>\<sessionId>.jsonl:
     (default)  the sessions in the kit registry (sessions.jsonl)
     -All       those, plus every interactive transcript from the last -Days days
+  Only the conversation file is copied, not the session's subagents\ or
+  tool-results\ folders, which Claude Code deletes along with it.
   A transcript is copied only when its archive copy is missing, smaller or older.
   Nothing is ever deleted, and ~/.claude/projects is only read. The archive is a
   backup: nothing in this kit restores from it.
@@ -43,13 +45,24 @@ try {
 
     # sessionId -> live transcript path
     $sources = [ordered]@{}
+    # sessionId -> transcript in any project folder, built once on the first miss: rows
+    # whose transcript never existed or was swept pile up in the append-only registry.
+    $index = $null
     # Every registry row, however old: a long-lived session can outlast any window.
     foreach ($r in @(Get-RegisteredSessions -Days 36500)) {
+        if ($sources.Contains($r.SessionId)) { continue }
         $t = Join-Path (Get-ProjectTranscriptDir $r.Cwd) ($r.SessionId + '.jsonl')
         # EnterWorktree moves a transcript to the worktree's project folder: look there too.
         if (-not (Test-Path -LiteralPath $t -PathType Leaf)) {
-            $t = Get-ChildItem -LiteralPath (Get-ClaudeProjectsDir) -Directory -ErrorAction SilentlyContinue |
-                ForEach-Object { Join-Path $_.FullName ($r.SessionId + '.jsonl') } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+            if ($null -eq $index) {
+                $index = @{}
+                foreach ($d in @(Get-ChildItem -LiteralPath (Get-ClaudeProjectsDir) -Directory -ErrorAction SilentlyContinue)) {
+                    foreach ($f in @(Get-ChildItem -LiteralPath $d.FullName -Filter '*.jsonl' -File -ErrorAction SilentlyContinue)) {
+                        if (-not $index.ContainsKey($f.BaseName)) { $index[$f.BaseName] = $f.FullName }
+                    }
+                }
+            }
+            $t = $index[$r.SessionId]
         }
         if ($t) { $sources[$r.SessionId] = $t }
     }

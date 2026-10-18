@@ -38,6 +38,21 @@
   fallback matches ordinally like `rg`. The archive finds a registered transcript that moved into a
   worktree's project folder and flushes each copy to disk before it replaces the old one; the
   title tail window no longer drops a line that starts exactly on its edge.
+- **Second review.** Resuming the latest session skips sessions that are open (it used to pick the
+  asking one and stop at `ALREADY_RUNNING`). `-Fork` creates the copy under a new `--session-id`
+  and records it, so the next resume of that folder finds the copy; the picker forks too (unrecorded).
+  Restore finds a crashed session whose transcript moved with `/cd` or a worktree instead of dropping
+  its record, and a moved session opens in the folder it moved to (the last `relocated` record, as the
+  CLI decides). The archive indexes the project folders once instead of once per missing registry row.
+  `reboot-plan.ps1` reports an empty or partial `state.json` as `RESUME_PENDING` and refuses a
+  handoff dated in the future; the logon script waits for missing extra folders once (30 s in all,
+  not 30 s each). A background session gets `claude attach <jobId>` advice instead of "switch to
+  that tab".
+  `--permission-mode default` is recorded as `manual`. An invalid `cleanupPeriodDays` or a
+  settings file that is not strict JSON is reported as such, and `7.0` counts as 7. A typed prompt
+  that starts with `<` can be a title, and a first-prompt title scores as message text in search.
+  Docs: one handoff file per session (`next-prompt-<id>.txt`), `-Query:` (a term may start with
+  `-`), titles and snippets are data, restore lists closed windows too.
 - Tests: the suite never runs the real `claude` (a stand-in answers `claude agents --json`), and a
   check fails if it ever does. It opens no console window.
 

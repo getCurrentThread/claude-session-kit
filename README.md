@@ -16,7 +16,7 @@ This repository used to be `reboot-continue`. It was renamed when the launcher w
 ## Requirements
 
 Windows 10/11 · [PowerShell 7](https://aka.ms/powershell) (`pwsh`) · Claude Code CLI (tested on
-2.1.302; `claude agents --json` needs 2.1.139 or later, and older versions fall back to the CLI's own
+2.1.302; `claude agents --json` needs 2.1.145 or later, and older versions fall back to the CLI's own
 per-process records) · Windows Terminal recommended (without it a plain console window is used).
 
 **The plugin installs two hooks.** `SessionStart` and `SessionEnd` run
@@ -95,25 +95,31 @@ those into extra `claude` arguments.
 
 **Resume.** `resume-session.ps1` picks a session in this order: the **launcher registry** → a **scan of
 interactive transcripts from the last 30 days** → the **CLI's own picker** (`claude --resume`) in that
-folder. Transcripts written by scheduled or SDK runs are never candidates, and `claude --continue` is
-never used — it reopens whatever is newest in a folder, which may be an automation's conversation.
+folder. Sessions that are open right now — the asking one included — are skipped (not by `-Fork`). Transcripts written
+by scheduled or SDK runs are never candidates, and `claude --continue` is never used — it reopens
+whatever is newest in a folder, which may be an automation's conversation.
 
 - **Never twice.** Before a tab is opened the kit asks which sessions are open right now
   (`claude agents --json`; failing that, the CLI's per-process records, each counted only while that
   PID is alive *and* started at the recorded time, or with no start time is a claude/node process). A
   session that is open is refused with
   `ALREADY_RUNNING` — two tabs on one conversation interleave their writes into one transcript.
-  `-Fork` (`--fork-session`) is still allowed: it is a new conversation.
+  `-Fork` (`--fork-session`) is still allowed: it is a new conversation, started under a new id
+  (`--session-id`) that is recorded like any launch, so the next resume of that folder finds it (a
+  fork made in the CLI's picker is not: only the CLI knows its id). A background session
+  (`claude agents`) is refused too; the result names the job id `claude attach` takes.
 - **Titles.** Lists show the name you gave (`/rename`, `--name`) over the CLI's generated title, and
   fall back to the first thing you typed (`titleSource` says which). The title is read from the head
   and the last 64 KB of the transcript, not the whole file.
-- **Search.** `search-sessions.ps1 -Query "<words>"` finds sessions whose title, folder name or messages
+- **Search.** `search-sessions.ps1 -Query:"<words>"` finds sessions whose title, folder name or messages
   contain every word (Hangul included), ranked title > folder > message text, with a one-line
   snippet. Only what you typed and what Claude answered is searched — not tool output. `rg` is used
   as a prefilter when it is installed.
-- **Permission mode.** A session started with `--permission-mode <mode>` is reopened with the same
-  mode. The kit never chooses one, and `bypassPermissions` is never replayed — it is reported as
-  `droppedPermissionMode` and the session comes back with normal prompts.
+- **Permission mode.** A session started with `--permission-mode <mode>` and not ended on purpose (a
+  closed window, a crash or a power cut left its hook record) is reopened with the same mode. After
+  `/exit` it comes back in the default mode. The kit never chooses one, and `bypassPermissions` is
+  never replayed — it is reported as `droppedPermissionMode` and the session comes back with normal
+  prompts.
 
 **Restore.** The hooks above leave a record for every interactive session that was not ended on
 purpose (`/exit`, Ctrl+C, `/clear`, `/resume`, logout delete it; a closed window, a crash or a power cut
@@ -121,14 +127,16 @@ leave it). `restore-open.ps1` lists the records whose session is not running now
 still exists, reopens all or some of them (`-All`, `-Ids <sessionId>,…`) in their recorded folders, or
 forgets them (`-Forget`, `-ForgetAll`). Each opens in the folder its transcript records (the hook's
 own cwd can have moved with a `cd` or a worktree), and the asking session is never offered. Folder
-trust is checked per session, as everywhere else.
+trust is checked per session, as everywhere else. Claude Code cannot tell a closed window from a
+crash, so every session whose tab was closed is listed until it is reopened or forgotten.
 
 **Retention.** Claude Code deletes transcripts older than `cleanupPeriodDays` (default 30) at startup,
 and a deleted session cannot be listed, searched or resumed. `list-sessions.ps1` reports the setting
 (read-only — nothing in the kit writes `settings.json`) and warns when it is 30 days or less. Raise
 it to a large value, **never 0** (rejected since v2.1.89; older versions read it as "save nothing"),
 or back transcripts up with `archive-sessions.ps1` (`-All` for every interactive transcript, `-List`
-to see what is kept). The archive is a plain copy that nothing reads back.
+to see what is kept). The archive is a plain copy that nothing reads back, of the conversation file
+only (not the session's `subagents\` or `tool-results\` folders).
 
 **Reboot and continue** is two steps on purpose:
 
@@ -199,7 +207,7 @@ from a trusted parent folder.
 
 Everything lives in `%USERPROFILE%\.claude\claude-session-kit\` — `aliases.json`, `sessions.jsonl`
 (registry), `open-sessions\` (one record per open interactive session, written by the hooks),
-`plan.json` / `state.json` / `state.last.json` (reboot), `next-prompt.txt`, `resume-prompt.txt` (only
+`plan.json` / `state.json` / `state.last.json` (reboot), `next-prompt-<id>.txt`, `resume-prompt.txt` (only
 with a `.cmd` shim), `runtime\resume.ps1` (frozen copy), `archive\` (only if you run
 `archive-sessions.ps1`; plain copies of transcripts), `kit.log`. The continuation prompt is stored in
 the state files because the resume needs it; it is **never** written to the log (which records its
@@ -217,12 +225,12 @@ All under `skills/session/scripts/`, all print one JSON object (`ok`, `code`, `m
 |---|---|---|
 | `list-aliases.ps1` | the alias table | none |
 | `list-sessions.ps1` | sessions that could be resumed, with title, `running` and the retention setting | none |
-| `search-sessions.ps1 -Query` | sessions by title, folder name or message text | none |
+| `search-sessions.ps1 -Query:` | sessions by title, folder name or message text | none |
 | `list-candidates.ps1` | most-used folders (`alias` is set on those already registered) | none |
 | `new-temp-task.ps1 [-Name]` | new scratch folder + new session | folder, terminal tab |
 | `open-workspace.ps1 -Alias\|-Path [-Name]` | new session in a workspace | terminal tab |
 | `resume-session.ps1 [-Alias\|-Path] [-SessionId] [-Fork]` | reopen a session | terminal tab |
-| `restore-open.ps1 [-All\|-Ids\|-Forget\|-ForgetAll]` | sessions left open by a crash or closed window | terminal tabs; `-Forget` deletes records |
+| `restore-open.ps1 [-All\|-Ids\|-Forget\|-ForgetAll]` | sessions left open by a crash or closed window | terminal tabs; prunes records that can never be reopened; `-Forget` deletes records |
 | `archive-sessions.ps1 [-All] [-List]` | back up transcripts | copies into `archive\` |
 | `reboot-plan.ps1` | plan a reboot-and-resume | writes `plan.json` only |
 | `reboot-commit.ps1 -Token` | **register + reboot** | RunOnce, `shutdown /r` |

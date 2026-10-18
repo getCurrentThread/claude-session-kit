@@ -52,8 +52,9 @@ try {
         Exit-WithResult ([ordered]@{ ok = $false; code = 'CONFLICTING_OPTIONS'; options = $actions; message = 'Use one of -List, -All, -Ids, -Forget or -ForgetAll. Nothing was opened or forgotten.' })
     }
 
+    $runningRows = @(Get-RunningSessions)
     $running = @{}
-    foreach ($r in @(Get-RunningSessions)) { $running[$r.SessionId] = $true }
+    foreach ($r in $runningRows) { $running[$r.SessionId] = $true }
     # The asking session is open whatever the CLI could tell us.
     if ($env:CLAUDE_CODE_SESSION_ID) { $running[$env:CLAUDE_CODE_SESSION_ID] = $true }
 
@@ -62,11 +63,12 @@ try {
     foreach ($rec in @(Get-OpenSessionRecords)) {
         if ($running.ContainsKey($rec.SessionId)) { continue }
         # The transcript is the one the hook was told about, and its name must be the id.
+        # /cd and worktree moves fire no SessionStart, so a moved one is looked up by id.
         $t = $rec.TranscriptPath
-        $info = $null
-        if ($t -and [IO.Path]::GetFileName($t) -eq ($rec.SessionId + '.jsonl') -and (Test-Path -LiteralPath $t -PathType Leaf)) {
-            $info = Get-ClaudeSessionRecord -TranscriptPath $t
+        if (-not ($t -and [IO.Path]::GetFileName($t) -eq ($rec.SessionId + '.jsonl') -and (Test-Path -LiteralPath $t -PathType Leaf))) {
+            $t = Find-SessionTranscript -SessionId $rec.SessionId
         }
+        $info = if ($t) { Get-ClaudeSessionRecord -TranscriptPath $t }
         if ($info -and $info.Kind -eq 'unreadable') { continue }   # locked for now; ask again later
         if (-not $info -or $info.Kind -ne 'interactive') {
             Remove-OpenSessionRecord -SessionId $rec.SessionId
@@ -127,7 +129,7 @@ try {
             try {
                 $workDir = Resolve-WorkspacePath $c.Cwd
                 $launch = if ($workDir) {
-                    Invoke-SessionLaunch -WorkDir $workDir -Mode resume -SessionId $c.SessionId -Source resume -PermissionMode $replay -AllowUntrusted:$AllowUntrusted
+                    Invoke-SessionLaunch -WorkDir $workDir -Mode resume -SessionId $c.SessionId -Source resume -PermissionMode $replay -AllowUntrusted:$AllowUntrusted -RunningSessions $runningRows
                 } else {
                     [ordered]@{ ok = $false; code = 'PATH_NOT_FOUND'; path = $c.Cwd; message = 'The folder recorded for that session no longer exists. Nothing was opened.' }
                 }

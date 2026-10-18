@@ -64,7 +64,9 @@ function Invoke-SessionLaunch {
         [string]$Name,
         [string]$PermissionMode,
         [switch]$Fork,
-        [switch]$AllowUntrusted
+        [switch]$AllowUntrusted,
+        # Get-RunningSessions rows the caller already has: each query starts a process
+        [object[]]$RunningSessions
     )
 
     $refusal = Get-NameRefusal $Name
@@ -88,28 +90,41 @@ function Invoke-SessionLaunch {
     # Two tabs on one conversation interleave their writes into the same transcript.
     # A fork is a new conversation, and a picker chooses in the tab, so neither is refused.
     if ($Mode -eq 'resume' -and -not $Fork) {
-        $running = @(Get-RunningSessions) | Where-Object { $_.SessionId -eq $SessionId } | Select-Object -First 1
+        $rows = if ($PSBoundParameters.ContainsKey('RunningSessions')) { @($RunningSessions) } else { @(Get-RunningSessions) }
+        $running = $rows | Where-Object { $_.SessionId -eq $SessionId } | Select-Object -First 1
         if ($running) {
+            # A background session has no tab to switch to; `claude attach` takes its job id, not the session id.
+            $jobId = if ($running.PSObject.Properties['JobId'] -and $running.JobId) { [string]$running.JobId } else { $null }
+            $message = if ($running.Kind -ne 'background') {
+                'That session is already open in another terminal. Nothing was opened; switch to that tab, or resume with -Fork to work on a copy.'
+            } elseif ($jobId) {
+                "That session is running in the background, not in a tab. Nothing was opened; ``claude attach $jobId`` opens it in a terminal."
+            } else {
+                'That session is running in the background, not in a tab. Nothing was opened; `claude agents` lists it and can open it.'
+            }
             return [ordered]@{
                 ok = $false; code = 'ALREADY_RUNNING'; sessionId = $SessionId; path = $WorkDir
-                pid = $running.Pid; kind = $running.Kind; name = $running.Name
-                message = 'That session is already open in another terminal. Nothing was opened; switch to that tab, or resume with -Fork to work on a copy.'
+                pid = $running.Pid; kind = $running.Kind; name = $running.Name; jobId = $jobId; message = $message
             }
         }
     }
 
     if ($Mode -eq 'new' -and -not $SessionId) { $SessionId = [guid]::NewGuid().ToString() }
-    $claudeArgs = Get-ClaudeArgs -Mode $Mode -SessionId $SessionId -Name $Name -PermissionMode $PermissionMode -Fork:$Fork
+    # A fork is created under an id minted here, so it can be recorded like any launch.
+    $forkedFrom = $null
+    $forkId = $null
+    if ($Fork -and $Mode -eq 'resume') { $forkedFrom = $SessionId; $forkId = [guid]::NewGuid().ToString() }
+    $claudeArgs = Get-ClaudeArgs -Mode $Mode -SessionId $SessionId -Name $Name -PermissionMode $PermissionMode -Fork:$Fork -ForkSessionId $forkId
+    if ($forkId) { $SessionId = $forkId }
 
     $launcher = Start-ClaudeTerminal -WorkDir $WorkDir -ClaudeExe $claude -ClaudeArgs $claudeArgs
 
-    # A forked resume gets an id only the CLI knows, and a picker has none at all:
-    # neither can be recorded truthfully, so neither is.
+    # A picker has no id at all: it cannot be recorded truthfully, so it is not.
     $registered = $false
-    if ($SessionId -and -not $Fork -and $Mode -ne 'picker') {
+    if ($SessionId -and $Mode -ne 'picker') {
         try { Register-LaunchedSession -SessionId $SessionId -Cwd $WorkDir -Alias $Alias -Source $Source -Name $Name; $registered = $true } catch {}
     }
-    Write-KitLog ("launch mode={0} source={1} launcher={2} session={3} cwd={4}" -f $Mode, $Source, $launcher, $SessionId, $WorkDir)
+    Write-KitLog ("launch mode={0} source={1} launcher={2} session={3} forkedFrom={4} cwd={5}" -f $Mode, $Source, $launcher, $SessionId, $forkedFrom, $WorkDir)
 
     # <CODE>_UNTRUSTED: the tab was opened on the user's say-so (-AllowUntrusted) in a
     # folder that really is untrusted, so it is sitting on the trust prompt.
@@ -122,8 +137,10 @@ function Invoke-SessionLaunch {
     }
     if (-not $trusted) { $message += ' The trust prompt is showing in that tab and has to be answered there, by the user.' }
 
-    return [ordered]@{
+    $result = [ordered]@{
         ok = $true; code = $code; path = $WorkDir; alias = $(if ($Alias) { $Alias } else { $null }); mode = $Mode; trusted = $trusted
         sessionId = $SessionId; registered = $registered; launcher = $launcher; message = $message
     }
+    if ($forkedFrom) { $result['forkedFrom'] = $forkedFrom }
+    return $result
 }

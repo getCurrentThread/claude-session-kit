@@ -200,6 +200,9 @@ function Open-OtherSessions {
         }
     }
     $seen = @{}; $count = 0
+    # One wait for all of them: the primary, which carries the handoff, opens after this loop.
+    # A stopwatch, not the clock: time sync can step the clock back right after logon.
+    $waited = [System.Diagnostics.Stopwatch]::StartNew()
     foreach ($other in @($state.others)) {
         if (-not $other) { continue }
         $id = [string]$other.session_id; $dir = [string]$other.workdir
@@ -207,11 +210,11 @@ function Open-OtherSessions {
             Write-Log 'Skipping invalid other session target.'; continue
         }
         $seen[$id] = $true; $count++
-        $exists = $false
-        foreach ($attempt in 1..10) {
-            if (Test-Path -LiteralPath $dir -PathType Container) { $exists = $true; break }
-            if ($DryRun) { break }
+        $exists = Test-Path -LiteralPath $dir -PathType Container
+        if (-not $exists -and -not $DryRun) { Write-Log "Waiting for $dir ..." }
+        while (-not $exists -and -not $DryRun -and $waited.Elapsed.TotalSeconds -lt 30) {
             Start-Sleep -Seconds 3
+            $exists = Test-Path -LiteralPath $dir -PathType Container
         }
         if (-not $exists) { Write-Log "Skipping session $id : saved workdir '$dir' not found."; continue }
         if (Test-SessionRunning $id) { Write-Log "Skipping session $id : already open in another terminal."; continue }
