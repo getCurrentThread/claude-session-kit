@@ -87,6 +87,8 @@ never a guess. Every session is started with its own `--session-id` and recorded
 It is started as a top-level session: the asking session's markers (`CLAUDECODE`,
 `CLAUDE_CODE_CHILD_SESSION`, its session id and entrypoint, …), which Windows Terminal would otherwise
 pass to the new tab, are dropped first — a `claude` that inherits them turns transcript saving off.
+Asked from a background session (`claude --bg`), the job folder (`CLAUDE_JOB_DIR`) is dropped too; a
+tab that inherits it joins the job and takes, and keeps following, the job's name.
 
 `-Name "<name>"` starts the session under that name (`claude --name`), so the CLI's own picker, the
 tab title and this kit's lists all show it. A name with quotes, backslashes, `%` or `& | < > ^ !` is
@@ -173,7 +175,9 @@ reboot-commit.ps1 -Token <t>
   the command line only points at that file.
 - **The other open sessions come back too.** A reboot would kill every open Claude session, so the
   plan also lists the other open interactive sessions (at most eight) whose transcript and folder
-  exist and whose folder is trusted — `alsoResume`, with the rest under `skipped` and a reason. After
+  exist and whose folder is trusted — `alsoResume`, with the rest under `skipped` and a reason. A
+  session whose transcript has not been written for over `-MaxIdleHours` (default 24) is skipped as
+  `IDLE`: it is running, but in a terminal nobody looks at. After
   logon each opens in its own tab with `claude --resume <id>` and **no prompt**; only the asking
   session gets the handoff. `-OnlyThis` brings back the asking session alone. The commit step
   re-validates that list (UUIDs, existing local folders, no duplicates, the cap) like everything else

@@ -244,13 +244,15 @@ function Get-ClaudeArgs {
 # that session's child: it turns transcript saving off (CLAUDE_CODE_CHILD_SESSION),
 # records the parent's entrypoint (anything but "cli" reads as automation, which
 # this kit will never resume) and links to the parent's id, bridge and messaging
-# socket. A launched session is a new top-level one, so these -- and only these;
-# user settings pass through -- are dropped before it starts.
+# socket. Asked from a background session (`claude --bg`), it also gets that job's
+# folder (CLAUDE_JOB_DIR) and joins the job: it takes the job's name, and follows
+# every rename of it. A launched session is a new top-level one, so these -- and
+# only these; user settings pass through -- are dropped before it starts.
 $script:InheritedSessionVariables = @(
     'CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_SESSION_ATTENDED',
     'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_EXECPATH', 'CLAUDE_CODE_BRIDGE_SESSION_ID',
     'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN',
-    'CLAUDE_PID', 'CLAUDE_EFFORT', 'AI_AGENT', 'TRACEPARENT'
+    'CLAUDE_PID', 'CLAUDE_EFFORT', 'CLAUDE_JOB_DIR', 'AI_AGENT', 'TRACEPARENT'
 )
 
 # True when `claude` is a batch shim (an npm install puts claude.cmd on PATH).

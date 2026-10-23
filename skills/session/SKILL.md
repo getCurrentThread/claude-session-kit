@@ -280,7 +280,11 @@ changes nothing. Only `reboot-commit.ps1 -Token` freezes a copy of the resume sc
      Tell the user their titles/ids and folders, and that they reopen **without a prompt**; only
      the primary receives the handoff. `skipped` lists excluded sessions and reasons, including
      any cut by the cap. Other folders must already be trusted; `-AllowUntrusted` never bypasses
-     their checks. Add `-OnlyThis` when only the primary should return.
+     their checks. Add `-OnlyThis` when only the primary should return. `IDLE` means the session
+     is still running but its transcript has not been written for over `-MaxIdleHours` (default
+     24) — typically a claude left in a terminal the user no longer sees. Name those (title,
+     `lastWrite`) and say they will not come back; plan again with a larger `-MaxIdleHours` only
+     if the user wants them.
    - `RESUME_PENDING` (`ok=false`) means `state.json` already holds a registered resume; report
      its `sessionId`, `workdir` and `createdAt`. Use `-Replace` only when replacing it is intended.
    - `PROMPT_STALE` (`ok=false`) means the prompt file is over 30 minutes old (or dated in the
