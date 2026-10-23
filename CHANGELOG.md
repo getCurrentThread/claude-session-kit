@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **A session launched from a background session gets its own name.** A background session
+  (`claude --bg`) has `CLAUDE_JOB_DIR` in its environment, and the launcher passed it on. Every tab
+  opened from there joined that job: it took the job's name as its own title (`always-on` on five
+  sessions in different folders) and followed each later rename of it. The launcher now drops
+  `CLAUDE_JOB_DIR` with the other session markers. Sessions launched before this fix keep the name
+  they recorded; `/rename` in that tab changes it.
+- **Reboot and continue no longer brings back sessions idle for days.** The plan took every
+  running interactive session as open work. A claude left in a terminal that another app's
+  background terminal host keeps alive (Orca's daemon, here) stays running for days after its
+  window is gone: three sessions untouched for 2.5 days came back after a reboot. Another session
+  now returns only if its transcript was written within `-MaxIdleHours` (default 24); the others
+  are reported under `skipped` as `IDLE`, with their title and `lastWrite`.
+
 ## 0.2.0 — the whole session lifecycle
 
 - **Restore after a crash or a closed window.** The plugin now ships `SessionStart`/`SessionEnd`
