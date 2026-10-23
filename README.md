@@ -175,7 +175,9 @@ reboot-commit.ps1 -Token <t>
   the command line only points at that file.
 - **The other open sessions come back too.** A reboot would kill every open Claude session, so the
   plan also lists the other open interactive sessions (at most eight) whose transcript and folder
-  exist and whose folder is trusted — `alsoResume`, with the rest under `skipped` and a reason. After
+  exist and whose folder is trusted — `alsoResume`, with the rest under `skipped` and a reason. A
+  session whose transcript has not been written for over `-MaxIdleHours` (default 24) is skipped as
+  `IDLE`: it is running, but in a terminal nobody looks at. After
   logon each opens in its own tab with `claude --resume <id>` and **no prompt**; only the asking
   session gets the handoff. `-OnlyThis` brings back the asking session alone. The commit step
   re-validates that list (UUIDs, existing local folders, no duplicates, the cap) like everything else

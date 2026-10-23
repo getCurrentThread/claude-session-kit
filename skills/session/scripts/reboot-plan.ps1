@@ -29,6 +29,12 @@
 
 .PARAMETER NoReboot
   Plan a registration only; the user reboots by hand and the resume fires at the next logon.
+
+.PARAMETER MaxIdleHours
+  Another open session comes back only if its transcript was written within this many
+  hours (default 24). Older ones are skipped as IDLE: a claude left running in a terminal
+  nobody looks at (another app's background terminal host keeps them alive for days) is
+  open, but it is not work in progress.
 #>
 [CmdletBinding()]
 param(
@@ -40,6 +46,7 @@ param(
     [switch]$NoReboot,
     [switch]$AllowUntrusted,
     [switch]$OnlyThis,
+    [ValidateRange(1, 87600)][int]$MaxIdleHours = 24,
     [switch]$Replace,
     [switch]$AllowStalePrompt
 )
@@ -153,8 +160,10 @@ try {
     }
     $sessionMode = if ($SessionId) { 'resume' } else { 'fresh' }
 
-    # Only open interactive sessions with their own trusted recorded folder come back.
+    # Only open interactive sessions with their own trusted recorded folder, written
+    # within -MaxIdleHours, come back.
     $others = @(); $alsoResume = @(); $skipped = @(); $seen = @{}
+    $idleCutoff = (Get-Date).AddHours(-$MaxIdleHours)
     if (-not $OnlyThis) {
         foreach ($row in @(Get-RunningSessions)) {
             $id = $row.SessionId
@@ -171,9 +180,14 @@ try {
                 elseif ($rec.Kind -ne 'interactive') { $reason = 'NOT_INTERACTIVE' }
                 elseif (-not $rec.Cwd -or -not ($cwd = Resolve-WorkspacePath $rec.Cwd)) { $reason = 'PATH_NOT_FOUND' }
                 elseif (-not (Test-WorkspaceTrusted -Path $cwd)) { $reason = 'UNTRUSTED_WORKSPACE' }
+                elseif ($rec.LastWrite -lt $idleCutoff) { $reason = 'IDLE' }
                 elseif ($others.Count -ge 8) { $reason = 'LIMIT_REACHED' }
             }
-            if ($reason) { $skipped += [ordered]@{ sessionId = $id; workdir = $row.Cwd; reason = $reason }; continue }
+            if ($reason) {
+                $cut = [ordered]@{ sessionId = $id; workdir = $row.Cwd; reason = $reason }
+                if ($reason -eq 'IDLE') { $cut.lastWrite = $rec.LastWrite.ToString('o'); $cut.title = $rec.Title }
+                $skipped += $cut; continue
+            }
             $others += [ordered]@{ session_id = $id; workdir = $cwd }
             $alsoResume += [ordered]@{ sessionId = $id; workdir = $cwd; title = $rec.Title }
         }

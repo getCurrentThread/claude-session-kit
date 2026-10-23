@@ -947,6 +947,8 @@ Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'claude.exe' -ClaudeArgs 
     $background = [guid]::NewGuid().ToString()
     $missingTranscript = [guid]::NewGuid().ToString()
     $missingCwd = New-Transcript -Cwd (Join-Path $work 'vanished') -Entrypoint 'cli' -When (Get-Date)
+    # still running, but untouched for three days (a terminal another app keeps alive)
+    $idle = New-Transcript -Cwd $otherDir -Entrypoint 'cli' -When (Get-Date).AddDays(-3) -Title 'idle work'
     $multiAgents = Join-Path $agentsDir 'multi.cmd'
     $rows = @(
         @{ sessionId = $newer; kind = 'interactive' },
@@ -956,7 +958,8 @@ Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'claude.exe' -ClaudeArgs 
         @{ sessionId = $cron; kind = 'interactive' },
         @{ sessionId = $background; kind = 'background' },
         @{ sessionId = $missingTranscript; kind = 'interactive' },
-        @{ sessionId = $missingCwd; kind = 'interactive' }
+        @{ sessionId = $missingCwd; kind = 'interactive' },
+        @{ sessionId = $idle; kind = 'interactive' }
     )
     function Set-AgentRows($Rows) { [IO.File]::WriteAllText($multiAgents, "@echo off`r`necho $($Rows | ConvertTo-Json -Compress)`r`n") }
     Set-AgentRows $rows
@@ -965,7 +968,14 @@ Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'claude.exe' -ClaudeArgs 
         Check 'reboot-plan: only trusted interactive open sessions return, deduplicated and in recorded folders' {
             $r = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-SessionId', $newer, '-AllowUntrusted')
             (Same @($r.Json.alsoResume.sessionId) @($second)) -and (Same $r.Json.alsoResume[0].workdir $otherDir) -and
-            (Same $r.Json.alsoResume[0].title 'second work') -and (Same @($r.Json.skipped.sessionId) @($untrusted, $cron, $background, $missingTranscript, $missingCwd))
+            (Same $r.Json.alsoResume[0].title 'second work') -and (Same @($r.Json.skipped.sessionId) @($untrusted, $cron, $background, $missingTranscript, $missingCwd, $idle))
+        }
+        Check 'reboot-plan: an open session idle past -MaxIdleHours (24 by default) is skipped as IDLE and reported; a longer window brings it back' {
+            $r = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-SessionId', $newer, '-AllowUntrusted')
+            $cut = @($r.Json.skipped | Where-Object { $_.sessionId -eq $idle })
+            $wide = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-SessionId', $newer, '-AllowUntrusted', '-MaxIdleHours', '96')
+            (Same $cut.Count 1) -and (Same $cut[0].reason 'IDLE') -and (Same $cut[0].title 'idle work') -and [bool]$cut[0].lastWrite -and
+            ($idle -notin @($r.Json.alsoResume.sessionId)) -and (Same @($wide.Json.alsoResume.sessionId) @($second, $idle))
         }
         Check 'reboot-plan -OnlyThis: no other sessions are planned' {
             $r = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-OnlyThis')
