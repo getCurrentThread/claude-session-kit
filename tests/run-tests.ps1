@@ -893,13 +893,13 @@ param($Lib, $Wt)
 . $Lib
 function Resolve-WindowsTerminal { $Wt }
 function Show-TerminalWindow {}
-foreach ($n in @($script:InheritedSessionVariables) + 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT') { Set-Item "Env:$n" 'parent' }
+foreach ($n in @($script:InheritedSessionVariables) + 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_JOB_DIR') { Set-Item "Env:$n" 'parent' }
 $env:CLAUDE_CODE_USE_POWERSHELL_TOOL = 'mine'
 Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'claude.exe' -ClaudeArgs @('--session-id', '11111111-1111-1111-1111-111111111111') | Out-Null
 '@)
         & pwsh -NoProfile -ExecutionPolicy Bypass -File $probe -Lib (Join-Path $scripts 'lib\Core.Effects.ps1') -Wt (Join-Path $stub 'wt.cmd') 2>&1 | Out-Null
         $seen = @(Get-Content -LiteralPath (Join-Path $stub 'env.txt'))
-        $leaked = @($seen | ForEach-Object { ($_ -split '=', 2)[0] } | Where-Object { $_ -in (@($script:InheritedSessionVariables) + 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT') })
+        $leaked = @($seen | ForEach-Object { ($_ -split '=', 2)[0] } | Where-Object { $_ -in (@($script:InheritedSessionVariables) + 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_JOB_DIR') })
         (Same $leaked @()) -and ('CLAUDE_CODE_USE_POWERSHELL_TOOL=mine' -in $seen)
     }
 

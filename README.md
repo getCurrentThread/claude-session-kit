@@ -87,6 +87,8 @@ never a guess. Every session is started with its own `--session-id` and recorded
 It is started as a top-level session: the asking session's markers (`CLAUDECODE`,
 `CLAUDE_CODE_CHILD_SESSION`, its session id and entrypoint, …), which Windows Terminal would otherwise
 pass to the new tab, are dropped first — a `claude` that inherits them turns transcript saving off.
+Asked from a background session (`claude --bg`), the job folder (`CLAUDE_JOB_DIR`) is dropped too; a
+tab that inherits it joins the job and takes, and keeps following, the job's name.
 
 `-Name "<name>"` starts the session under that name (`claude --name`), so the CLI's own picker, the
 tab title and this kit's lists all show it. A name with quotes, backslashes, `%` or `& | < > ^ !` is

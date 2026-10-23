@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **A session launched from a background session gets its own name.** A background session
+  (`claude --bg`) has `CLAUDE_JOB_DIR` in its environment, and the launcher passed it on. Every tab
+  opened from there joined that job: it took the job's name as its own title (`always-on` on five
+  sessions in different folders) and followed each later rename of it. The launcher now drops
+  `CLAUDE_JOB_DIR` with the other session markers. Sessions launched before this fix keep the name
+  they recorded; `/rename` in that tab changes it.
+
 ## 0.2.0 — the whole session lifecycle
 
 - **Restore after a crash or a closed window.** The plugin now ships `SessionStart`/`SessionEnd`
