@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **`-TrustFolder`: open an untrusted folder with no trust prompt.** `open-workspace`,
+  `new-temp-task`, `resume-session` and `restore-open` take it. The kit writes
+  `projects[<trust key>].hasTrustDialogAccepted: true` into `~/.claude.json` — what answering the
+  prompt writes — and then opens the tab, which starts straight away. This reverses the old rule that
+  the kit never writes that file: it is now the one write, only on the person's say-so, under the
+  lock Claude Code itself takes (`~/.claude.json.lock`), re-read inside the lock, changing one key,
+  replaced in one rename, with the previous copy kept as `claude.json.before-trust`. A drive root,
+  the home folder and anything above it are refused (`TRUST_REFUSED`); a held lock or a file that
+  does not parse fails closed (`TRUST_WRITE_FAILED`). `new-temp-task` trusts only the new folder.
+  Checked against Claude Code 2.1.311: a folder trusted this way starts without the prompt, and the
+  entry survives the CLI's own later writes of the file.
+- **`UNTRUSTED_WORKSPACE` says what trusting would switch on**: `ships` lists the hooks count, MCP
+  server names, allow-rule and env-key counts from the folder's `.claude/settings*.json` and
+  `.mcp.json`.
+- `new-temp-task` removes the scratch folder it just created when the launch fails.
+
 - **A session launched from a background session gets its own name.** A background session
   (`claude --bg`) has `CLAUDE_JOB_DIR` in its environment, and the launcher passed it on. Every tab
   opened from there joined that job: it took the job's name as its own title (`always-on` on five

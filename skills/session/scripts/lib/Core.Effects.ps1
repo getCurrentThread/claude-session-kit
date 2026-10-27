@@ -65,6 +65,8 @@ function Invoke-SessionLaunch {
         [string]$PermissionMode,
         [switch]$Fork,
         [switch]$AllowUntrusted,
+        # Marks the folder trusted in ~/.claude.json first, so no prompt appears. Only on the person's say-so.
+        [switch]$TrustFolder,
         # Get-RunningSessions rows the caller already has: each query starts a process
         [object[]]$RunningSessions
     )
@@ -73,11 +75,12 @@ function Invoke-SessionLaunch {
     if ($refusal) { return $refusal }
 
     $trusted = Test-WorkspaceTrusted -Path $WorkDir
-    if (-not $trusted -and -not $AllowUntrusted) {
+    if (-not $trusted -and -not $AllowUntrusted -and -not $TrustFolder) {
         return [ordered]@{
             ok = $false; code = 'UNTRUSTED_WORKSPACE'; path = $WorkDir
             trustKey = (Get-TrustKey -Path $WorkDir)
             isRepo = [bool](Get-GitRootOrNull -Path $WorkDir)
+            ships = (Get-WorkspaceShips -Path $WorkDir)
             message = 'This folder is not trusted in Claude Code yet. No session was started.'
         }
     }
@@ -117,6 +120,14 @@ function Invoke-SessionLaunch {
     $claudeArgs = Get-ClaudeArgs -Mode $Mode -SessionId $SessionId -Name $Name -PermissionMode $PermissionMode -Fork:$Fork -ForkSessionId $forkId
     if ($forkId) { $SessionId = $forkId }
 
+    # Written only after every refusal above, so a refused launch never leaves trust behind.
+    $trustWritten = $false
+    if (-not $trusted -and $TrustFolder) {
+        $t = Set-WorkspaceTrusted -Path $WorkDir
+        if (-not $t.ok) { $t['path'] = $WorkDir; return $t }
+        $trusted = $true; $trustWritten = [bool]$t.written
+    }
+
     $launcher = Start-ClaudeTerminal -WorkDir $WorkDir -ClaudeExe $claude -ClaudeArgs $claudeArgs
 
     # A picker has no id at all: it cannot be recorded truthfully, so it is not.
@@ -136,11 +147,13 @@ function Invoke-SessionLaunch {
         'picker' { "No session could be chosen automatically; the CLI's own session picker was opened in that folder." }
     }
     if (-not $trusted) { $message += ' The trust prompt is showing in that tab and has to be answered there, by the user.' }
+    if ($trustWritten) { $message += ' The folder was marked trusted in Claude Code first (-TrustFolder), so no trust prompt was shown.' }
 
     $result = [ordered]@{
         ok = $true; code = $code; path = $WorkDir; alias = $(if ($Alias) { $Alias } else { $null }); mode = $Mode; trusted = $trusted
         sessionId = $SessionId; registered = $registered; launcher = $launcher; message = $message
     }
+    if ($trustWritten) { $result['trustWritten'] = $true; $result['trustKey'] = Get-TrustKey -Path $WorkDir }
     if ($forkedFrom) { $result['forkedFrom'] = $forkedFrom }
     return $result
 }

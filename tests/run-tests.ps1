@@ -208,6 +208,39 @@ try {
             -not (Test-WorkspaceTrusted -Path $plain -ConfigFile $bad)
         }
         Check 'trust: the key reported for a repo subfolder is the repo root' { Same (Get-TrustKey -Path $repoDir) (ConvertTo-TrustPath (Join-Path $work 'trusted-parent\repo')) }
+
+        # The writer runs against copies: the sandbox's own .claude.json must stay byte-identical (checked at the end).
+        $trustCfg = Join-Path $sandbox 'trust-cfg.json'
+        $rich = '{"firstStartTime":"2026-10-25T00:54:42.123Z","numStartups":1793059505666,"cost":0.1,"k":1,"K":2,"s":"한글","projects":{"C:/x":{"allowedTools":[],"hasTrustDialogAccepted":false}},"deep":{"l":[[1],[]],"o":{}}}'
+        Check 'trust write: adds only projects[<repo root>].hasTrustDialogAccepted; dates, case-only keys and the rest survive' {
+            [IO.File]::WriteAllText($trustCfg, $rich)
+            $r = Set-WorkspaceTrusted -Path $repoDir -ConfigFile $trustCfg
+            $key = ConvertTo-TrustPath (Join-Path $work 'trusted-parent\repo')
+            $expect = $rich | ConvertFrom-Json -AsHashtable -DateKind String
+            $expect.projects[$key] = [ordered]@{ hasTrustDialogAccepted = $true }
+            $got = Get-Content -LiteralPath $trustCfg -Raw | ConvertFrom-Json -AsHashtable -DateKind String
+            (Same $r.code 'TRUSTED') -and (Same $r.trustKey $key) -and (Same ($got | ConvertTo-Json -Depth 20 -Compress) ($expect | ConvertTo-Json -Depth 20 -Compress)) -and
+            ((Get-Content -LiteralPath $trustCfg -Raw) -match '"2026-10-25T00:54:42\.123Z"') -and (Test-WorkspaceTrusted -Path $repoDir -ConfigFile $trustCfg) -and
+            -not (Test-Path -LiteralPath "$trustCfg.lock") -and -not @(Get-ChildItem -LiteralPath $sandbox -Filter '*.tmp') -and (Test-Path -LiteralPath (Get-KitPath trustBackup))
+        }
+        Check 'trust write: a second call writes nothing; home, a drive root and the folders above home are refused' {
+            $hash = (Get-FileHash $trustCfg).Hash
+            $again = Set-WorkspaceTrusted -Path $repoDir -ConfigFile $trustCfg
+            $codes = @($env:USERPROFILE, 'C:\', (Split-Path -Parent $env:USERPROFILE)) | ForEach-Object { (Set-WorkspaceTrusted -Path $_ -ConfigFile $trustCfg).code }
+            (Same $again.code 'ALREADY_TRUSTED') -and (Same $again.written $false) -and (Same $codes @('TRUST_REFUSED', 'TRUST_REFUSED', 'TRUST_REFUSED')) -and ((Get-FileHash $trustCfg).Hash -eq $hash)
+        }
+        Check 'trust write: a held lock, a corrupt file or no file at all fails closed and writes nothing' {
+            $hash = (Get-FileHash $trustCfg).Hash
+            New-Item -ItemType Directory -Path "$trustCfg.lock" | Out-Null
+            $held = Set-WorkspaceTrusted -Path $plain -ConfigFile $trustCfg -LockAttempts 2
+            $kept = (Test-Path -LiteralPath "$trustCfg.lock") -and ((Get-FileHash $trustCfg).Hash -eq $hash)
+            [IO.Directory]::Delete("$trustCfg.lock")
+            $bad = Join-Path $sandbox 'trust-bad.json'; [IO.File]::WriteAllText($bad, '{ broken')
+            $corrupt = Set-WorkspaceTrusted -Path $declined -ConfigFile $bad
+            $none = Set-WorkspaceTrusted -Path $declined -ConfigFile (Join-Path $sandbox 'trust-none.json')
+            (Same $held.code 'TRUST_WRITE_FAILED') -and $kept -and (Same $corrupt.code 'TRUST_WRITE_FAILED') -and (Same (Get-Content -LiteralPath $bad -Raw) '{ broken') -and
+            -not (Test-Path -LiteralPath "$bad.lock") -and (Same $none.code 'TRUST_WRITE_FAILED') -and -not (Test-Path -LiteralPath (Join-Path $sandbox 'trust-none.json'))
+        }
     }
 
     $now = Get-Date
@@ -560,6 +593,55 @@ $splat = $ArgsJson | ConvertFrom-Json -AsHashtable
         $r = Invoke-Stubbed 'restore-open.ps1' '{"All":true}'
         (Same $r.Json.code 'RESTORED') -and (Same $r.Json.requested 2) -and (Same $r.Json.opened 1) -and
         (Same @($r.Json.results.code) @('UNTRUSTED_WORKSPACE', 'RESUMED')) -and (Same $r.Tabs.Count 1) -and (Same @($r.Tabs[0].argv)[-1] $lostA)
+    }
+
+    # -TrustFolder: each run gets its own copy of the config, so the sandbox's stays untouched.
+    $shipper = New-Item -ItemType Directory -Force -Path (Join-Path $work 'shipper\.claude') | ForEach-Object { $_.Parent.FullName }
+    [IO.File]::WriteAllText((Join-Path $shipper '.claude\settings.json'), '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"x"}]}]},"permissions":{"allow":["Bash(*)"]}}')
+    [IO.File]::WriteAllText((Join-Path $shipper '.mcp.json'), '{"mcpServers":{"srv":{"command":"x"}}}')
+    function Use-ConfigCopy([scriptblock]$Run) {
+        $dir = Join-Path $sandbox ('cfg-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        Copy-Item -LiteralPath (Join-Path $cfgDir '.claude.json') -Destination $dir
+        $keep = $env:CLAUDE_CONFIG_DIR
+        try { $env:CLAUDE_CONFIG_DIR = $dir; return (& $Run (Join-Path $dir '.claude.json')) } finally { $env:CLAUDE_CONFIG_DIR = $keep }
+    }
+    Check 'untrusted refusal lists what the folder ships (hooks, MCP servers, allow rules)' {
+        $r = Invoke-Script 'open-workspace.ps1' @('-Path', $shipper)
+        (Same $r.Json.code 'UNTRUSTED_WORKSPACE') -and (Same $r.Json.ships.hooks 1) -and (Same @($r.Json.ships.mcpServers) @('srv')) -and (Same $r.Json.ships.allowRules 1) -and (Same @($r.Json.ships.files).Count 2)
+    }
+    Check 'open-workspace -TrustFolder: marks the folder trusted, then opens it with no prompt (LAUNCHED, not _UNTRUSTED)' {
+        Use-ConfigCopy {
+            param($cfg)
+            $r = Invoke-Stubbed 'open-workspace.ps1' (@{ Path = $shipper; TrustFolder = $true } | ConvertTo-Json -Compress)
+            (Same $r.Json.code 'LAUNCHED') -and (Same $r.Json.trusted $true) -and (Same $r.Json.trustWritten $true) -and
+            (Same $r.Json.trustKey (ConvertTo-TrustPath $shipper)) -and (Same $r.Tabs.Count 1) -and (Test-WorkspaceTrusted -Path $shipper -ConfigFile $cfg)
+        }
+    }
+    Check 'open-workspace -TrustFolder: a launch refused for another reason writes no trust' {
+        Use-ConfigCopy {
+            param($cfg)
+            $hash = (Get-FileHash $cfg).Hash
+            $r = Invoke-Script 'open-workspace.ps1' @('-Path', $shipper, '-Name', 'R&D', '-TrustFolder')
+            (Same $r.Json.code 'INVALID_NAME') -and ((Get-FileHash $cfg).Hash -eq $hash)
+        }
+    }
+    Check 'new-temp-task -TrustFolder: an untrusted root is fine; only the NEW folder is trusted; a failed write leaves no folder' {
+        $ok = Use-ConfigCopy {
+            param($cfg)
+            $r = Invoke-Stubbed 'new-temp-task.ps1' '{"TrustFolder":true}'
+            $made = @(Get-ChildItem -LiteralPath $declined -Directory)
+            $made | ForEach-Object { [IO.Directory]::Delete($_.FullName) }
+            (Same $r.Json.code 'LAUNCHED') -and (Same $made.Count 1) -and (Same $r.Json.trustKey (ConvertTo-TrustPath $made[0].FullName)) -and
+            (Test-WorkspaceTrusted -Path $made[0].FullName -ConfigFile $cfg) -and -not (Test-WorkspaceTrusted -Path $declined -ConfigFile $cfg)
+        }
+        # A fresh copy: in the first one the reused folder number is already trusted.
+        $ok -and (Use-ConfigCopy {
+            param($cfg)
+            New-Item -ItemType Directory -Path "$cfg.lock" | Out-Null
+            try { $f = Invoke-Stubbed 'new-temp-task.ps1' '{"TrustFolder":true}' } finally { [IO.Directory]::Delete("$cfg.lock") }
+            (Same $f.Json.code 'TRUST_WRITE_FAILED') -and (Same $f.Tabs.Count 0) -and -not (Get-ChildItem -LiteralPath $declined -Directory)
+        })
     }
     Check 'restore-open: a record whose transcript moved to another project folder (/cd, a worktree) is listed, not pruned; -ForgetAll forgets all and opens nothing' {
         $own = Join-Path $sandbox 'kit-moved'
@@ -1359,10 +1441,15 @@ public static class W {
         (Same @($hits | Sort-Object) @('Core.State.ps1', 'resume-after-reboot.ps1')) -and (Same $added @("'agents'", "'--json'"))
     }
     Check '`claude --continue` is never emitted' { -not ($all | Where-Object { (Code $_) -match "['""]--continue['""]|['""]-c['""]" }) }
-    Check 'nothing writes ~/.claude.json or names hasTrustDialogAccepted outside the read-only check' {
+    Check 'only Set-WorkspaceTrusted writes ~/.claude.json, and only Invoke-SessionLaunch (-TrustFolder) calls it' {
         $named = @($all | Where-Object { (Code $_) -match 'hasTrustDialogAccepted' } | ForEach-Object Name)
         $state = Code (Get-Item (Join-Path $scripts 'lib\Core.State.ps1'))
-        (Same $named @('Core.State.ps1')) -and ($state -notmatch '(Set-Content|Out-File|WriteAllText|Add-Content)[^\n]*(ConfigFile|claude\.json)')
+        $writer = [regex]::Match($state, '(?s)function Set-WorkspaceTrusted \{.*?\n\}\n').Value
+        $rest = $state.Replace($writer, '')
+        $callers = @($all | Where-Object { (Code $_) -match 'Set-WorkspaceTrusted\s+-' } | ForEach-Object Name)
+        (Same $named @('Core.State.ps1')) -and $writer -and (Same $callers @('Core.Effects.ps1')) -and
+        ($rest -notmatch '(Set-Content|Out-File|WriteAllText|Add-Content|Move\(|Copy-Item)[^\n]*(ConfigFile|claude\.json)') -and
+        ($rest -notmatch "hasTrustDialogAccepted'?\]?\s*=[^=]")
     }
     Check 'every script is pure ASCII (Windows PowerShell 5.1 reads BOM-less files as ANSI)' {
         $bad = @($all | Where-Object { [IO.File]::ReadAllText($_.FullName) -match '[^\x00-\x7F]' } | ForEach-Object Name)

@@ -26,8 +26,10 @@
   code: OPEN_SESSIONS | NOTHING_TO_RESTORE | RESTORED | NOT_RESTORED | FORGOTTEN |
         NOT_IN_LIST | CONFLICTING_OPTIONS
   RESTORED / NOT_RESTORED carry `results`, one per session, each with its own code:
-        RESUMED (RESUMED_UNTRUSTED after -AllowUntrusted) | UNTRUSTED_WORKSPACE |
-        PATH_NOT_FOUND | ALREADY_RUNNING | CLAUDE_NOT_FOUND | INTERNAL_ERROR
+        RESUMED (RESUMED_UNTRUSTED after -AllowUntrusted) | UNTRUSTED_WORKSPACE | TRUST_REFUSED |
+        TRUST_WRITE_FAILED | PATH_NOT_FOUND | ALREADY_RUNNING | CLAUDE_NOT_FOUND | INTERNAL_ERROR
+  -TrustFolder marks each reopened session's folder trusted in ~/.claude.json first, so no
+  trust prompt appears; only when the user said so, and best with -Ids rather than -All.
 #>
 [CmdletBinding(PositionalBinding = $false)]
 param(
@@ -38,7 +40,8 @@ param(
     [string[]]$Ids,
     [string[]]$Forget,
     [switch]$ForgetAll,
-    [switch]$AllowUntrusted
+    [switch]$AllowUntrusted,
+    [switch]$TrustFolder
 )
 
 $ErrorActionPreference = 'Stop'
@@ -129,7 +132,7 @@ try {
             try {
                 $workDir = Resolve-WorkspacePath $c.Cwd
                 $launch = if ($workDir) {
-                    Invoke-SessionLaunch -WorkDir $workDir -Mode resume -SessionId $c.SessionId -Source resume -PermissionMode $replay -AllowUntrusted:$AllowUntrusted -RunningSessions $runningRows
+                    Invoke-SessionLaunch -WorkDir $workDir -Mode resume -SessionId $c.SessionId -Source resume -PermissionMode $replay -AllowUntrusted:$AllowUntrusted -TrustFolder:$TrustFolder -RunningSessions $runningRows
                 } else {
                     [ordered]@{ ok = $false; code = 'PATH_NOT_FOUND'; path = $c.Cwd; message = 'The folder recorded for that session no longer exists. Nothing was opened.' }
                 }

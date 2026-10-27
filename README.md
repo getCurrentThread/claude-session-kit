@@ -201,11 +201,23 @@ reboot-commit.ps1 -Token <t>
 
 **Folder trust — fail closed.** Claude Code asks once per folder whether you trust it, because a
 folder's `.claude/settings.json` can run hooks and MCP servers. A tab opened by a launcher tends to sit
-on that prompt unseen, so the kit checks `~/.claude.json` **read-only** first and, for an untrusted
-folder, **refuses to start the session and says so**. You then open the folder yourself once, or tell
-Claude to go ahead (`-AllowUntrusted`), in which case the prompt appears in the new tab and you answer
-it. The kit never writes `hasTrustDialogAccepted`. Note that a git repository does not inherit trust
-from a trusted parent folder.
+on that prompt unseen, so the kit checks `~/.claude.json` first and, for an untrusted folder,
+**refuses to start the session and says so** — listing what the folder ships (`ships`: hooks, MCP
+servers, allow rules, env keys). You then pick one of three:
+
+- open the folder yourself once and answer the prompt;
+- tell Claude to go ahead (`-AllowUntrusted`): the prompt appears in the new tab and you answer it;
+- tell Claude to trust it and open it (`-TrustFolder`): the kit writes
+  `projects[<folder>].hasTrustDialogAccepted: true` itself — what answering the prompt writes — and
+  the tab starts with **no prompt**. The folder's hooks, MCP servers and settings then apply, for good.
+
+`-TrustFolder` is the kit's only write to `~/.claude.json`. It takes the lock Claude Code itself uses
+for that file (`~/.claude.json.lock`), re-reads the file inside it, changes that one key, replaces the
+file in one rename and keeps the previous copy as `claude.json.before-trust` in the state folder. It
+refuses a drive root, the home folder and anything above it (`TRUST_REFUSED`), and fails closed when
+the lock is held or the file does not parse (`TRUST_WRITE_FAILED`). Note that a git repository does
+not inherit trust from a trusted parent folder, and that trusting a folder inside a repository trusts
+the whole repository.
 
 ## State
 
@@ -301,7 +313,9 @@ Windows용 Claude Code 플러그인입니다. 스킬 하나(`claude-session-kit:
   경고하고(설정은 읽기만 합니다, 0은 금지), `archive-sessions.ps1`로 사본을 남길 수 있습니다.
 
 별칭은 플러그인 밖 `%USERPROFILE%\.claude\claude-session-kit\aliases.json`에 둡니다. 신뢰되지 않은
-폴더에서는 세션을 **켜지 않고 알려줍니다**(fail-closed) — `hasTrustDialogAccepted`를 대신 쓰지 않습니다.
+폴더에서는 세션을 **켜지 않고 알려줍니다**(fail-closed). "신뢰하고 열어줘"라고 하면(`-TrustFolder`) 킷이
+`~/.claude.json`에 그 폴더의 신뢰를 직접 기록하고 신뢰 질문 없이 엽니다. Claude Code와 같은 잠금을 쓰고,
+홈 폴더·드라이브 루트는 거부합니다.
 비밀번호를 저장하지 않는 반자동 설계라 로그인은 직접 합니다.
 
 ## License

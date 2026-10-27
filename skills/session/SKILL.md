@@ -103,7 +103,8 @@ looks first.
 
 Success codes are `LAUNCHED` here and `RESUMED` / `PICKER_OPENED` in §2. After a rerun with
 `-AllowUntrusted` in a folder that really is untrusted, each becomes `<CODE>_UNTRUSTED`: the tab is
-open but parked on the trust prompt — tell the user to answer it there.
+open but parked on the trust prompt — tell the user to answer it there. After a rerun with
+`-TrustFolder` the code stays plain and `trustWritten: true` says the folder was marked trusted first.
 
 ### `UNTRUSTED_WORKSPACE` — no session was started (fail closed)
 
@@ -113,19 +114,34 @@ that prompt unseen, so **an untrusted folder is not opened at all.** §2 and §3
 with the same meaning. When you get it:
 
 1. **Say so plainly** — this folder is not trusted in Claude Code yet, so no session was started.
-2. One line on why it matters — that folder's `.claude/settings.json` hooks and MCP servers run as
-   soon as a session starts there.
+2. **Say what trusting it switches on**, from `ships`: the number of `hooks`, the `mcpServers` names,
+   the `allowRules` and `envKeys` counts in the folder's `.claude/settings*.json` and `.mcp.json`
+   (`files`). All zero and empty means it ships none of these.
 3. Offer the choices:
    - **Open it themselves** — the user goes to the folder in a terminal, runs `claude`, and answers
      the prompt.
-   - **Open it anyway** — only if the user explicitly says so, rerun the same command with
-     `-AllowUntrusted`. The trust prompt appears in the new tab and **the user has to answer it.**
+   - **Open it anyway** — rerun the same command with `-AllowUntrusted`. The trust prompt appears in
+     the new tab and **the user has to answer it.**
+   - **Trust it and open** — rerun the same command with `-TrustFolder`. The kit writes
+     `projects[<trustKey>].hasTrustDialogAccepted: true` into `~/.claude.json` itself (what answering
+     the prompt writes), so **no prompt appears** and that folder's hooks, MCP servers and settings
+     apply from this session on, for good. `new-temp-task.ps1 -TrustFolder` trusts only the new
+     folder, not the scratch root.
 4. If `isRepo` is true, add: **a git repository does not inherit trust from its parent folder.** Even
-   under a trusted parent, the repository (`trustKey`) has to be trusted on its own.
+   under a trusted parent, the repository (`trustKey`) has to be trusted on its own — and
+   `-TrustFolder` on a subfolder trusts the whole repository.
 
-**Never:** write `hasTrustDialogAccepted` into `~/.claude.json` to skip the prompt. That accepts trust
-on the user's behalf and lets the folder's hooks and MCP settings run unreviewed. Even if the user
-asks, do not write it for them — point them to step 3.
+`-AllowUntrusted` and `-TrustFolder` are each used **only when the user's latest message says so**
+("open it anyway" / "trust it and open", "신뢰하고 열어", "질문 없이 열어"). A request to open a folder
+is not a request to trust it, and approval for one folder does not extend to another. Never write
+`~/.claude.json` any other way. `reboot-plan.ps1` has no `-TrustFolder`: there, offer to open the
+folder with `-TrustFolder` first.
+
+`TRUST_REFUSED` — the kit does not trust a drive root, the home folder or a folder above it (every
+folder below would inherit it); nothing was written or opened. `TRUST_WRITE_FAILED` — the config
+file could not be updated safely (another Claude Code process held its lock, or it would not parse);
+nothing was written or opened. Relay `message`; a retry is fine for the lock case. The file as it was
+before the last trust write is kept in the state folder as `claude.json.before-trust`.
 
 ### Other codes
 
@@ -377,7 +393,8 @@ the set that was open. Same Gate 1 as §1 (an open verb), with "what was open" a
    `PATH_NOT_FOUND` mean the same as in §1, and nothing was opened for that session. `ALREADY_RUNNING`
    means it is already open in another tab. The top-level `RESTORED` means at least one session
    opened; `NOT_RESTORED` means none did. Open an untrusted one only when the user explicitly says
-   so: `-Ids <sessionId> -AllowUntrusted`.
+   so: `-Ids <sessionId> -AllowUntrusted`, or `-Ids <sessionId> -TrustFolder` to trust it with no
+   prompt (§1 — the same rules and codes).
 5. **Forget** — when the user does not want some of them back, this opens nothing (`FORGOTTEN`):
    ```
    pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/restore-open.ps1" -Forget <sessionId>,<sessionId>

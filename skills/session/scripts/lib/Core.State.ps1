@@ -36,7 +36,7 @@ function Get-KitRoot {
 }
 
 function Get-KitPath {
-    param([Parameter(Mandatory)][ValidateSet('aliases', 'registry', 'openSessions', 'state', 'stateLast', 'plan', 'prompt', 'log', 'runtime', 'archive')][string]$Name)
+    param([Parameter(Mandatory)][ValidateSet('aliases', 'registry', 'openSessions', 'state', 'stateLast', 'plan', 'prompt', 'log', 'runtime', 'archive', 'trustBackup')][string]$Name)
     $root = Get-KitRoot
     switch ($Name) {
         'aliases' { Join-Path $root 'aliases.json' }
@@ -49,6 +49,7 @@ function Get-KitPath {
         'log' { Join-Path $root 'kit.log' }
         'runtime' { Join-Path $root 'runtime' }
         'archive' { Join-Path $root 'archive' }
+        'trustBackup' { Join-Path $root 'claude.json.before-trust' }
     }
 }
 
@@ -142,7 +143,7 @@ function Get-ProjectTranscriptDir {
     return (Join-Path (Get-ClaudeProjectsDir) (ConvertTo-ProjectSlug $Path))
 }
 
-# --- folder trust (READ ONLY) -------------------------------------------------------
+# --- folder trust -----------------------------------------------------------------
 # Claude Code decides whether to show "do you trust this folder?" by looking the
 # folder up in ~/.claude.json. Repeating that lookup lets the launcher refuse up
 # front instead of opening a tab that parks on a prompt nobody sees.
@@ -154,10 +155,11 @@ function Get-ProjectTranscriptDir {
 #   * Trust is inherited from ancestors, but the walk stops at the git root: a
 #     repository does NOT inherit trust from a trusted parent folder.
 #
-# Nothing here writes that file, and nothing in this kit may. Accepting trust on
-# a person's behalf removes the one gate between opening a folder and running the
-# hooks, MCP servers and settings that folder ships with. When the answer is
-# unclear the answer is "untrusted": the worst case is one refused launch.
+# Only Set-WorkspaceTrusted writes that file, and only on -TrustFolder: accepting
+# trust removes the one gate between opening a folder and running the hooks, MCP
+# servers and settings that folder ships with, so it happens only when the person
+# asked for it. When the answer is unclear the answer is "untrusted": the worst
+# case is one refused launch.
 function Get-GitRootOrNull {
     param([Parameter(Mandatory)][string]$Path)
     # Looks for `.git` as a directory OR a file (worktrees, submodules), the way the
@@ -215,6 +217,107 @@ function Test-WorkspaceTrusted {
         if ($slash -lt 0) { return $false }   # "C:" -- nothing above
         $current = $current.Substring(0, $slash)
     }
+}
+
+# What accepting trust would switch on: the project settings, local settings and
+# .mcp.json of the folder and of its trust root. Counts and server names only.
+function Get-WorkspaceShips {
+    param([Parameter(Mandatory)][string]$Path)
+    $files = [System.Collections.Generic.List[string]]::new()
+    $mcp = [System.Collections.Generic.List[string]]::new()
+    $hooks = 0; $allow = 0; $envKeys = 0
+    $dirs = @(ConvertTo-NormalizedPath $Path)
+    $git = Get-GitRootOrNull -Path $Path
+    if ($git -and -not (Test-PathEqual $git $Path)) { $dirs += ConvertTo-NormalizedPath $git }
+    foreach ($dir in $dirs) {
+        foreach ($rel in @('.claude\settings.json', '.claude\settings.local.json', '.mcp.json')) {
+            $file = Join-Path $dir $rel
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
+            $files.Add($file)
+            try { $doc = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json -AsHashtable } catch { continue }
+            if ($doc -isnot [System.Collections.IDictionary]) { continue }
+            if ($rel -eq '.mcp.json') {
+                if ($doc['mcpServers'] -is [System.Collections.IDictionary]) { foreach ($k in $doc['mcpServers'].Keys) { $mcp.Add([string]$k) } }
+                continue
+            }
+            if ($doc['hooks'] -is [System.Collections.IDictionary]) {
+                foreach ($event in $doc['hooks'].Values) { foreach ($m in @($event)) { if ($m -is [System.Collections.IDictionary]) { $hooks += @($m['hooks'] | Where-Object { $_ }).Count } } }
+            }
+            if ($doc['permissions'] -is [System.Collections.IDictionary]) { $allow += @($doc['permissions']['allow'] | Where-Object { $_ }).Count }
+            if ($doc['env'] -is [System.Collections.IDictionary]) { $envKeys += $doc['env'].Count }
+        }
+    }
+    return [ordered]@{ files = @($files); hooks = $hooks; mcpServers = @($mcp | Select-Object -Unique); allowRules = $allow; envKeys = $envKeys }
+}
+
+# The one writer of ~/.claude.json, for -TrustFolder. It writes what answering the
+# trust prompt writes -- projects[<trust key>].hasTrustDialogAccepted = true -- under
+# the lock Claude Code itself takes for that file (a `<file>.lock` DIRECTORY, the
+# proper-lockfile convention), re-reading the file inside the lock so a running
+# session's last write is never lost, and replacing it in one rename.
+function Set-WorkspaceTrusted {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [string]$ConfigFile = (Get-ClaudeConfigFile),
+        [int]$LockAttempts = 30
+    )
+    $key = Get-TrustKey -Path $Path
+    $userHome = ConvertTo-TrustPath (ConvertTo-NormalizedPath $env:USERPROFILE)
+    # A drive root, the home folder or anything above it would hand trust to every
+    # folder below; Claude Code itself never persists trust for the home folder.
+    if ($key -notmatch '/' -or $key -ieq $userHome -or $userHome.StartsWith($key + '/', [StringComparison]::OrdinalIgnoreCase)) {
+        return [ordered]@{
+            ok = $false; code = 'TRUST_REFUSED'; trustKey = $key
+            message = 'The kit does not mark a drive root or the home folder (or a folder above it) as trusted: every folder below would be trusted with it. Nothing was written or opened.'
+        }
+    }
+    if (Test-WorkspaceTrusted -Path $Path -ConfigFile $ConfigFile) {
+        return [ordered]@{ ok = $true; code = 'ALREADY_TRUSTED'; trustKey = $key; written = $false }
+    }
+    $fail = { param($why) [ordered]@{ ok = $false; code = 'TRUST_WRITE_FAILED'; trustKey = $key; message = "Could not mark the folder trusted ($why). Nothing was written or opened." } }
+    if (-not (Test-Path -LiteralPath $ConfigFile -PathType Leaf)) { return (& $fail 'Claude Code has no config file yet: run claude once') }
+
+    # mkdir is the lock: it fails atomically when the directory exists. .NET's
+    # CreateDirectory succeeds on an existing one, so the Win32 call is used.
+    if (-not ('ClaudeSessionKit.NativeDir' -as [type])) {
+        Add-Type -Namespace ClaudeSessionKit -Name NativeDir -MemberDefinition '[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool CreateDirectoryW(string path, IntPtr security);'
+    }
+    $lock = $ConfigFile + '.lock'
+    $held = $false
+    for ($i = 0; $i -lt $LockAttempts -and -not $held; $i++) {
+        $held = [ClaudeSessionKit.NativeDir]::CreateDirectoryW($lock, [IntPtr]::Zero)
+        if (-not $held) {
+            if ([Runtime.InteropServices.Marshal]::GetLastWin32Error() -ne 183) { break }   # anything but ERROR_ALREADY_EXISTS
+            Start-Sleep -Milliseconds 100
+        }
+    }
+    if (-not $held) { return (& $fail 'another Claude Code process holds the config lock; try again') }
+
+    $tmp = '{0}.csk-{1}.tmp' -f $ConfigFile, [guid]::NewGuid().ToString('N')
+    try {
+        $text = [IO.File]::ReadAllText($ConfigFile)
+        # -DateKind String: without it every ISO date in the file comes back reformatted.
+        $config = $text | ConvertFrom-Json -AsHashtable -DateKind String
+        if ($config -isnot [System.Collections.IDictionary]) { return (& $fail 'the config file is not a JSON object') }
+        if ($config['projects'] -isnot [System.Collections.IDictionary]) { $config['projects'] = [ordered]@{} }
+        $entry = $config['projects'][$key]
+        if ($entry -is [System.Collections.IDictionary]) { $entry['hasTrustDialogAccepted'] = $true }
+        else { $config['projects'][$key] = [ordered]@{ hasTrustDialogAccepted = $true } }
+        # A truncated document must never reach the disk: a depth overflow is an error, not a warning.
+        $json = $config | ConvertTo-Json -Depth 100 -WarningAction Stop
+        $back = $json | ConvertFrom-Json -AsHashtable -DateKind String
+        if (($back | ConvertTo-Json -Depth 100 -Compress) -cne ($config | ConvertTo-Json -Depth 100 -Compress)) { return (& $fail 'the rewritten file did not read back the same') }
+        [IO.File]::WriteAllText($tmp, $json, [Text.UTF8Encoding]::new($false))
+        Copy-Item -LiteralPath $ConfigFile -Destination (Get-KitPath trustBackup) -Force
+        [IO.File]::Move($tmp, $ConfigFile, $true)
+    } catch {
+        return (& $fail $_.Exception.Message)
+    } finally {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction Ignore
+        try { [IO.Directory]::Delete($lock) } catch {}
+    }
+    Write-KitLog ("trust written key={0}" -f $key)
+    return [ordered]@{ ok = $true; code = 'TRUSTED'; trustKey = $key; written = $true }
 }
 
 # --- aliases ----------------------------------------------------------------------------
