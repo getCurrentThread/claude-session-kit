@@ -34,6 +34,9 @@
   window is gone: three sessions untouched for 2.5 days came back after a reboot. Another session
   now returns only if its transcript was written within `-MaxIdleHours` (default 24); the others
   are reported under `skipped` as `IDLE`, with their title and `lastWrite`.
+- **Removed: the one-release compatibility reads.** `reboot-cancel` and the resume script no longer
+  look for the old `reboot-continue` skill's `state.json` (kept "for one release" in 0.1.0), and the
+  kit no longer falls back to `CLAUDE_SESSION_ID`: Claude Code exports `CLAUDE_CODE_SESSION_ID`.
 
 ## 0.2.0 — the whole session lifecycle
 

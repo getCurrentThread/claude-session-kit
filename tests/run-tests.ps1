@@ -49,10 +49,9 @@ $kitHome = Join-Path $sandbox 'kit'
 $cfgDir  = Join-Path $sandbox 'claude'
 $work    = Join-Path $sandbox 'work'
 New-Item -ItemType Directory -Force -Path $kitHome, (Join-Path $cfgDir 'projects'), $work | Out-Null
-$saved = @{ kit = $env:CLAUDE_SESSION_KIT_HOME; cfg = $env:CLAUDE_CONFIG_DIR; sid = $env:CLAUDE_SESSION_ID; csid = $env:CLAUDE_CODE_SESSION_ID; bin = $env:CLAUDE_CODE_BIN }
+$saved = @{ kit = $env:CLAUDE_SESSION_KIT_HOME; cfg = $env:CLAUDE_CONFIG_DIR; csid = $env:CLAUDE_CODE_SESSION_ID; bin = $env:CLAUDE_CODE_BIN }
 $env:CLAUDE_SESSION_KIT_HOME = $kitHome
 $env:CLAUDE_CONFIG_DIR = $cfgDir
-$env:CLAUDE_SESSION_ID = $null
 $env:CLAUDE_CODE_SESSION_ID = $null   # the suite may itself be running inside a Claude Code session
 # The real `claude` never runs here: a first run migrates CLAUDE_CONFIG_DIR/.claude.json and starts a
 # daemon for it. Every test that needs another stand-in sets its own and comes back to this one.
@@ -1506,7 +1505,7 @@ public static class W {
     }
 } finally {
     try { if ($script:savedOutEnc) { [Console]::OutputEncoding = $script:savedOutEnc } } catch {}
-    $env:CLAUDE_SESSION_KIT_HOME = $saved.kit; $env:CLAUDE_CONFIG_DIR = $saved.cfg; $env:CLAUDE_SESSION_ID = $saved.sid
+    $env:CLAUDE_SESSION_KIT_HOME = $saved.kit; $env:CLAUDE_CONFIG_DIR = $saved.cfg
     $env:CLAUDE_CODE_SESSION_ID = $saved.csid; $env:CLAUDE_CODE_BIN = $saved.bin; $env:CSK_TEST_WORK = $null
     try { Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction Stop } catch {}
 }

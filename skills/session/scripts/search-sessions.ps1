@@ -90,7 +90,7 @@ try {
 
     $ic = [StringComparison]::OrdinalIgnoreCase
     # the session running the search holds the query itself
-    $self = if ($env:CLAUDE_CODE_SESSION_ID) { $env:CLAUDE_CODE_SESSION_ID } else { $env:CLAUDE_SESSION_ID }
+    $self = $env:CLAUDE_CODE_SESSION_ID
     $rows = [System.Collections.Generic.List[object]]::new()
     foreach ($s in $candidates) {
         # no recorded folder: nowhere to reopen it, so list-sessions leaves it out too

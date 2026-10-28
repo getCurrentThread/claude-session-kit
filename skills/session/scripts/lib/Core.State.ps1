@@ -36,7 +36,7 @@ function Get-KitRoot {
 }
 
 function Get-KitPath {
-    param([Parameter(Mandatory)][ValidateSet('aliases', 'registry', 'openSessions', 'state', 'stateLast', 'plan', 'prompt', 'log', 'runtime', 'archive', 'trustBackup')][string]$Name)
+    param([Parameter(Mandatory)][ValidateSet('aliases', 'registry', 'openSessions', 'state', 'stateLast', 'plan', 'log', 'runtime', 'archive', 'trustBackup')][string]$Name)
     $root = Get-KitRoot
     switch ($Name) {
         'aliases' { Join-Path $root 'aliases.json' }
@@ -45,7 +45,6 @@ function Get-KitPath {
         'state' { Join-Path $root 'state.json' }
         'stateLast' { Join-Path $root 'state.last.json' }
         'plan' { Join-Path $root 'plan.json' }
-        'prompt' { Join-Path $root 'next-prompt.txt' }
         'log' { Join-Path $root 'kit.log' }
         'runtime' { Join-Path $root 'runtime' }
         'archive' { Join-Path $root 'archive' }
@@ -798,7 +797,7 @@ function Resolve-ResumeTarget {
     if (-not $IncludeOpen) {
         foreach ($o in @($RunningSessions)) { if ($o -and $o.SessionId) { $open[[string]$o.SessionId] = $true } }
         # The asking session is open whatever the CLI could tell us.
-        foreach ($v in $env:CLAUDE_CODE_SESSION_ID, $env:CLAUDE_SESSION_ID) { if ($v) { $open[$v] = $true } }
+        if ($env:CLAUDE_CODE_SESSION_ID) { $open[$env:CLAUDE_CODE_SESSION_ID] = $true }
     }
     $skipped = [System.Collections.Generic.HashSet[string]]::new()
 

@@ -133,9 +133,8 @@ try {
         return $null
     }
 
-    # Claude Code exports the id of the running session; the older name is kept for
-    # one release.
-    $envSid = if ($env:CLAUDE_CODE_SESSION_ID) { $env:CLAUDE_CODE_SESSION_ID } else { $env:CLAUDE_SESSION_ID }
+    # Claude Code exports the id of the running session.
+    $envSid = $env:CLAUDE_CODE_SESSION_ID
 
     if ($SessionId) {
         if (-not (Test-SessionIdFormat $SessionId)) {

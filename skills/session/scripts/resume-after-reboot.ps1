@@ -56,12 +56,6 @@ function Wait-BeforeClose {
 
 Write-Log "resume-after-reboot started (DryRun=$([bool]$DryRun))"
 
-if (-not (Test-Path -LiteralPath $stateFile) -and -not $env:CLAUDE_SESSION_KIT_HOME) {
-    # One release of grace for a reboot scheduled by the older standalone skill, which
-    # never knew CLAUDE_SESSION_KIT_HOME (set, it is a test sandbox).
-    $legacy = Join-Path $env:USERPROFILE '.claude\reboot-continue\state.json'
-    if (Test-Path -LiteralPath $legacy) { $stateFile = $legacy }
-}
 if (-not (Test-Path -LiteralPath $stateFile)) {
     Write-Log "No state file at $stateFile - nothing to resume."
     Wait-BeforeClose

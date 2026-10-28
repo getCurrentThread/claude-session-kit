@@ -7,9 +7,6 @@
   does not parse. It can abort a shutdown and delete this kit's own RunOnce value,
   plan and state -- nothing else.
 
-  Also sweeps the state file of the older standalone "reboot-continue" skill, which
-  used the same RunOnce value name.
-
   Prints one JSON object. code: CANCELLED | NOTHING_PENDING | STATUS | RUNONCE_NOT_REMOVED
   (the resume may still fire at the next logon)
 
@@ -26,8 +23,6 @@ $ErrorActionPreference = 'Stop'
 $kitRoot     = if ($env:CLAUDE_SESSION_KIT_HOME) { $env:CLAUDE_SESSION_KIT_HOME } else { Join-Path $env:USERPROFILE '.claude\claude-session-kit' }
 $planFile    = Join-Path $kitRoot 'plan.json'
 $stateFile   = Join-Path $kitRoot 'state.json'
-# The older skill never knew CLAUDE_SESSION_KIT_HOME; set, it is a test sandbox.
-$legacyState = if ($env:CLAUDE_SESSION_KIT_HOME) { $null } else { Join-Path $env:USERPROFILE '.claude\reboot-continue\state.json' }
 $runOnceKey  = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce'
 $valueName   = 'ClaudeRebootContinue'
 
@@ -44,14 +39,12 @@ try {
 
     if ($Status) {
         $summary = $null
-        foreach ($f in @($stateFile, $legacyState)) {
-            if (-not $f -or -not (Test-Path -LiteralPath $f)) { continue }
+        if (Test-Path -LiteralPath $stateFile) {
             try {
-                $s = Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json
+                $s = Get-Content -LiteralPath $stateFile -Raw -Encoding UTF8 | ConvertFrom-Json
                 $others = @($s.others | Where-Object { $_ } | ForEach-Object { [ordered]@{ sessionId = [string]$_.session_id; workdir = [string]$_.workdir } })
-                $summary = [ordered]@{ others = $others; othersCount = $others.Count; file = $f; workdir = [string]$s.workdir; sessionId = [string]$s.session_id; promptLength = ([string]$s.prompt).Length; createdAt = [string]$s.created_at }
-            } catch { $summary = [ordered]@{ file = $f; unreadable = $true } }
-            break
+                $summary = [ordered]@{ others = $others; othersCount = $others.Count; file = $stateFile; workdir = [string]$s.workdir; sessionId = [string]$s.session_id; promptLength = ([string]$s.prompt).Length; createdAt = [string]$s.created_at }
+            } catch { $summary = [ordered]@{ file = $stateFile; unreadable = $true } }
         }
         Out-Result ([ordered]@{
                 ok = $true; code = 'STATUS'
@@ -73,8 +66,8 @@ try {
     }
 
     $removedFiles = @()
-    foreach ($f in @($stateFile, $planFile, $legacyState)) {
-        if ($f -and (Test-Path -LiteralPath $f)) { Remove-Item -LiteralPath $f -Force; $removedFiles += $f }
+    foreach ($f in @($stateFile, $planFile)) {
+        if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force; $removedFiles += $f }
     }
 
     if ($runOnceError) {
