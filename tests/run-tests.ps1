@@ -1476,9 +1476,17 @@ public static class W {
         (Same $p.name 'claude-session-kit') -and ('skills' -notin $p.PSObject.Properties.Name) -and (Same $m.plugins[0].name $p.name) -and (Same $m.plugins[0].version $p.version) -and
         (Test-Path (Join-Path $repo 'skills\session\SKILL.md'))
     }
-    Check 'SKILL.md uses ${CLAUDE_SKILL_DIR}, not a fixed install path or %USERPROFILE%' {
-        $s = Get-Content (Join-Path $repo 'skills\session\SKILL.md') -Raw
-        ($s -match [regex]::Escape('${CLAUDE_SKILL_DIR}')) -and ($s -notmatch '%USERPROFILE%') -and ($s -notmatch '\.claude[\\/]skills[\\/]')
+    Check 'SKILL.md and references/ use ${CLAUDE_SKILL_DIR}, not a fixed install path or %USERPROFILE%' {
+        foreach ($f in @(Get-Item (Join-Path $repo 'skills\session\SKILL.md')) + @(Get-ChildItem (Join-Path $repo 'skills\session\references') -Filter '*.md')) {
+            $s = Get-Content -LiteralPath $f.FullName -Raw
+            if (-not ($s -match [regex]::Escape('${CLAUDE_SKILL_DIR}')) -or $s -match '%USERPROFILE%' -or $s -match '\.claude[\\/]skills[\\/]') { throw $f.Name }
+        }
+        $true
+    }
+    Check 'every references/*.md that SKILL.md names exists, and SKILL.md names every one' {
+        $named = @([regex]::Matches((Get-Content (Join-Path $repo 'skills\session\SKILL.md') -Raw), 'references/([\w-]+\.md)') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+        $onDisk = @(Get-ChildItem (Join-Path $repo 'skills\session\references') -Filter '*.md' | ForEach-Object Name | Sort-Object)
+        ($named.Count -gt 0) -and (Same $named $onDisk)
     }
     # The list of a person's private words must not itself be published, so it lives
     # outside the repository: one token per line in <kit state>\private-tokens.txt.

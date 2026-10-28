@@ -33,6 +33,10 @@ object on stdout** — branch on `ok` and `code`; `message` is the explanation f
 are in English: relay them in the user's language. Any script can also return `INTERNAL_ERROR`
 (exit code 2): relay its `message` and do not retry blindly.
 
+§3, §5 and the last two sections keep their full steps in `references/` next to this file: read the
+one named there before running that branch's scripts. Inside those files `${CLAUDE_SKILL_DIR}` means
+this same folder.
+
 The rules below apply to the user's words in whatever language they are spoken.
 
 ## 0. Pick the branch — when in doubt, ask instead of running
@@ -247,94 +251,13 @@ changes nothing. Only `reboot-commit.ps1 -Token` freezes a copy of the resume sc
    the machine off. **A §1 or §2 request ("open", "open it again") can never be approval for this
    branch.**
 
-2. **Leave a structured handoff note.** Write the prompt that becomes the resumed session's first
-   input to `next-prompt-<session id>.txt` in the state folder
-   (`<home>\.claude\claude-session-kit\next-prompt-<UUID>.txt`, the UUID from step 3; plain
-   `next-prompt.txt` only when the id is unknown) **with the Write tool** (guarantees UTF-8). One file
-   per session, so another session's note can never become this one's handoff. Give Write the expanded absolute path, not a variable.
-   Fill every heading in this template with concrete details; write "None" when nothing failed:
-   ```
-   Why the machine restarted
-   <the change that required a restart>
-   Done so far
-   <completed work and its evidence>
-   Tried and failed
-   <failed attempts and what they showed, or None>
-   Next steps
-   <the remaining work in order>
-   Verify first
-   <the command to run first, for example wsl --status, and the expected result>
-   ```
+**Keep `reboot-commit.ps1` out of any permission allowlist.** The permission prompt on this one file
+is the last lock. Every other script is built so that it cannot restart the machine, and the tests
+check that.
 
-3. **Session id** (if you can): in your own scratchpad path `…\Temp\claude\<project>\<UUID>\scratchpad`
-   the `<UUID>` is the current session id. If you cannot get it, leave `-SessionId` out — the script
-   reads the running session's id from the `CLAUDE_CODE_SESSION_ID` environment variable, and failing
-   that takes the newest **interactive** transcript in this folder. Never pass an id you are not sure
-   of: `SESSION_REJECTED` means that id has no transcript, is not an interactive session, or belongs
-   to another folder (`recordedCwd` says which).
-
-4. **Plan (read-only):**
-   ```
-   pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/reboot-plan.ps1" -WorkDir "<absolute project path>" -PromptFile "<absolute path of the note from step 2>" -SessionId <UUID>
-   ```
-   Read the `REBOOT_PLANNED` result before going on:
-   - `sessionMode`: `resume` continues that session; **`fresh` means no session to continue was found
-     and a new session carrying only the prompt will start** — tell the user and confirm first.
-   - `sessionSource`: `explicit` or `env` is this session. `scan:interactive` / `scan:sidecar` is the
-     newest session found in the folder, which is a different conversation when two are open there —
-     check `sessionId` against your own, and confirm with the user if you cannot.
-   - `promptDelivery`: `file` means `claude` is an npm-style `.cmd` shim here, so after logon the
-     prompt is handed over in `resume-prompt.txt` instead of on the command line. Nothing to do.
-   - `alsoResume` lists the other open interactive sessions that will return (at most eight).
-     Tell the user their titles/ids and folders, and that they reopen **without a prompt**; only
-     the primary receives the handoff. `skipped` lists excluded sessions and reasons, including
-     any cut by the cap. Other folders must already be trusted. Add `-OnlyThis` when only the
-     primary should return. `IDLE` means the session is still running but its transcript has not
-     been written for over `-MaxIdleHours` (default 24) — typically a claude left in a terminal
-     the user no longer sees. Name those (title, `lastWrite`) and say they will not come back;
-     plan again with a larger `-MaxIdleHours` only if the user wants them.
-   - `RESUME_PENDING` (`ok=false`) means `state.json` already holds a registered resume; report
-     its `sessionId`, `workdir` and `createdAt`. Use `-Replace` only when replacing it is intended.
-   - `PROMPT_STALE` (`ok=false`) means the prompt file is over 30 minutes old (or dated in the
-     future). Rewrite the handoff; `-AllowStalePrompt` explicitly permits reusing it.
-
-   If the user wants to restart by hand, add `-NoReboot` (registers only). The `alsoResume` list is
-   fixed at plan time: those sessions reopen at that logon even if they are closed in between, so
-   suggest `-OnlyThis` when the manual restart may be much later.
-
-5. **Commit (destructive — only with the approval from step 1):**
-   ```
-   pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/reboot-commit.ps1" -Token <token>
-   ```
-   The token expires after ten minutes and works once.
-
-6. **Branch on `code` and tell the user.**
-   - `REBOOT_SCHEDULED` — the computer restarts in `delaySeconds` seconds; `shutdown /a` aborts; after
-     logon a terminal opens by itself and this session continues. Say that, then **end the turn at
-     once and make no further tool calls.**
-   - `RESUME_REGISTERED` (`-NoReboot`) — nothing restarts now; the resume fires at the next logon after
-     the user restarts by hand. Say that, then end the turn.
-   - `SHUTDOWN_FAILED` — Windows refused the restart, but the resume **is still registered**. Say so,
-     offer to cancel it (§4), then end the turn.
-   - `NO_PLAN`, `TOKEN_MISMATCH`, `PLAN_EXPIRED`, `PLAN_INVALID` — nothing was registered. Go back to
-     step 2: rewrite the note if anything changed, and plan again. The approval from step 1 still stands only while it is the user's latest
-     message; otherwise ask again. Never retry with a guessed token, and never edit `plan.json`.
-
-Notes:
-
-- **Keep `reboot-commit.ps1` out of any permission allowlist.** The permission prompt on this one file
-  is the last lock. Every other script is built so that it cannot restart the machine, and the tests
-  check that.
-- The delay cannot go below 30 seconds (other apps may hold unsaved work).
-- Permission prompts behave as usual in the resumed session (nothing is auto-approved).
-- **Scheduled and SDK sessions are never resume targets.** They pile up in the same project folder and
-  are often the newest, but only interactive transcripts are candidates — plus this session's own
-  just-started transcript (a "sidecar"), and only while it is under ten minutes old.
-- If the primary saved folder is missing at logon (a drive that is not connected yet), nothing is launched and
-  the state is kept; the terminal says how to run the resume again.
-  A missing folder for another session skips that session and logs it; the remaining sessions still open.
-- If something goes wrong, the log is `<home>\.claude\claude-session-kit\kit.log` (the prompt body is
-  never written to it).
+Once step 1 is passed, **read `${CLAUDE_SKILL_DIR}/references/reboot.md` and follow steps 2–6
+there** — the handoff note, the session id, the read-only plan, the commit, and what to tell the
+user for each `code`. Never run `reboot-plan.ps1` or `reboot-commit.ps1` without it.
 
 ## 4. Cancel / Status — read and clean-up only
 
@@ -358,96 +281,19 @@ logout). Sessions lost to a crash, a closed window or a power cut keep their rec
 what this branch reopens. It is not §2: §2 reopens one earlier session, while this branch brings back
 the set that was open. Same Gate 1 as §1 (an open verb), with "what was open" as the object.
 
-1. **List first (opens nothing; drops records that can never be reopened):**
-   ```
-   pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/restore-open.ps1"
-   ```
-   `OPEN_SESSIONS` gives numbered rows (`n`, `title`, `cwd`, `cwdExists`, `lastWrite`,
-   `permissionMode`), newest first. Sessions that are open right now never appear. Claude Code cannot
-   tell a closed window from a crash, so the rows include every session whose tab or window was
-   closed, and they stay until forgotten: when rows are days old, show their `lastWrite` and offer
-   `-Forget` for the ones the user does not want. On `NOTHING_TO_RESTORE`, tell the user there is
-   nothing to bring back, and do not switch to §2 on your own.
-2. **Confirm before opening more than one tab.** Show the list and ask: all of them, or which numbers?
-   One row that the user has already named can be opened without asking again.
-3. **Reopen:**
-   ```
-   pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/restore-open.ps1" -All
-   pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/restore-open.ps1" -Ids <sessionId>,<sessionId>
-   ```
-   Pass the `sessionId` values of the rows the user chose. Row numbers (`-Ids 1,3`) work too, but
-   they shift whenever a session closes or reopens. `NOT_IN_LIST` means list again. Each
-   tab resumes its own session in the folder recorded for it, with the permission mode that session
-   was started with (`permissionMode`). `bypassPermissions` is never replayed. When a result carries
-   `droppedPermissionMode`, tell the user that session now runs with normal permission prompts.
-4. **Relay `results`, one line per session.** `RESUMED` means it is open again.
-   `UNTRUSTED_WORKSPACE` and `PATH_NOT_FOUND` mean the same as in §1, and nothing was opened for
-   that session. `ALREADY_RUNNING` means it is already open in another tab. The top-level
-   `RESTORED` means at least one session opened; `NOT_RESTORED` means none did. For an untrusted
-   one, offer `-Ids <sessionId> -TrustFolder` (§1 — the same offer, rules and codes).
-5. **Forget** — when the user does not want some of them back, this opens nothing (`FORGOTTEN`):
-   ```
-   pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/restore-open.ps1" -Forget <sessionId>,<sessionId>
-   pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/restore-open.ps1" -ForgetAll
-   ```
+**Read `${CLAUDE_SKILL_DIR}/references/restore.md` and follow its steps**: list first (it opens
+nothing), and confirm before opening more than one tab.
 
 ## Retention and archive
 
-Claude Code deletes transcripts older than `cleanupPeriodDays` (default 30, in `settings.json` in the
-Claude config folder), and a deleted session cannot be listed, searched or resumed. When
-`list-sessions.ps1` returns a `warning` (`retentionDays` is 30 or less), relay it once and offer the
-two ways to keep older sessions. `retentionDays` comes from the user's own `settings.json` only: an
-organisation's managed settings or a project's settings can set a lower value, which then wins.
-`retentionDays: null` with a `warning` means that file's value is not a whole number of 1 or more,
-or the file is not strict JSON: relay the warning.
-
-- **Raise the setting** to a large value such as 3650 — **never 0**: since v2.1.89 it is rejected, and
-  older versions took 0 as "save no transcripts". No script in this kit writes `settings.json`; the
-  user changes it, or asks you to as a separate edit.
-- **Back them up** — copying only, read-only towards Claude Code's own folder:
-
-```
-# the sessions this kit opened (the registry)
-pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/archive-sessions.ps1"
-# plus every interactive transcript from the last -Days days
-pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/archive-sessions.ps1" -All [-Days 30]
-# what the archive holds: ids, folders, sizes, dates -- never content
-pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/archive-sessions.ps1" -List
-```
-
-`ARCHIVED` counts `copied` / `upToDate` / `failed`; a transcript is copied only when its archive copy
-is missing, smaller or older, and nothing is ever deleted. Only the conversation file is copied,
-not the session's `subagents\` or `tool-results\` folders. Copies land in
-`<state folder>\archive\<project folder>\<sessionId>.jsonl`. The archive is a backup that nothing
-in this kit reads back: to reopen an archived session after Claude Code deleted it, the user first
-raises `cleanupPeriodDays` above the session's age (the copy keeps its old date, so Claude Code's next
-start would delete it again), then copies the file by hand into the same project folder under
-`~/.claude/projects`; resume it with `resume-session.ps1 -SessionId <id>` using the id from
-`ARCHIVE_LIST` — its old date keeps it out of the list and the search.
+When `list-sessions.ps1` returns a `warning` or `retentionDays: null`, or the user asks to back
+sessions up, read `${CLAUDE_SKILL_DIR}/references/retention.md`.
 
 ## Adding or changing an alias
 
-When the user says something like "add an alias for this folder too: `<name>` = `<path>`":
-
-1. Check that the path really exists (if not, do not create it — ask).
-2. Ask which phrases should select it (`triggers`), and whether the bare name can mean something else
-   (`note`).
-3. Edit the `aliases.json` at the `file` path reported by `list-aliases.ps1` (confirm before
-   applying); when the code was `NO_ALIASES` the file does not exist yet, so create it. The format is
-   the one in `${CLAUDE_SKILL_DIR}/../../examples/aliases.example.json`. A `path` is an absolute
-   path; `%VAR%` references in it are expanded.
-4. Run `list-aliases.ps1` again. `ALIASES_UNREADABLE` means the JSON is broken — fix it before
-   anything else, because every script that takes `-Alias` fails until it parses.
+When the user asks to add or change an alias, or to look for new candidates, read
+`${CLAUDE_SKILL_DIR}/references/aliases.md` first.
 
 **Never write an alias or a path into this SKILL.md or any file in the skill folder.** The skill
 folder is either a git repository or a plugin cache that is replaced on every update — no place for
 personal paths.
-
-To look for new candidates (read-only):
-
-```
-pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/list-candidates.ps1"
-```
-
-It lists the most-used folders. A row whose `alias` is not null is already registered — do not offer
-it as a new candidate.
