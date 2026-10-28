@@ -23,8 +23,7 @@
   (`permissionMode`); bypassPermissions never is (`droppedPermissionMode`).
 
   Prints one JSON object.
-  code: RESUMED | PICKER_OPENED (each with an _UNTRUSTED suffix after -AllowUntrusted, when the
-        tab is on the trust prompt) | NO_RESUMABLE_SESSION | UNTRUSTED_WORKSPACE | TRUST_REFUSED |
+  code: RESUMED | PICKER_OPENED | NO_RESUMABLE_SESSION | UNTRUSTED_WORKSPACE | TRUST_REFUSED |
         TRUST_WRITE_FAILED | ALREADY_RUNNING | ALIAS_NOT_FOUND | PATH_NOT_FOUND | CLAUDE_NOT_FOUND
 
 .PARAMETER TrustFolder
@@ -45,7 +44,6 @@ param(
     [int]$Days = 30,
     [switch]$Fork,
     [switch]$NoPicker,
-    [switch]$AllowUntrusted,
     [switch]$TrustFolder
 )
 
@@ -92,7 +90,7 @@ try {
     $recorded = if ($target.SessionId) { @(Get-OpenSessionRecords) | Where-Object { $_.SessionId -eq $target.SessionId } | Select-Object -First 1 }
     $startMode = if ($recorded -and $recorded.PermissionMode) { $recorded.PermissionMode } else { $null }
     $replay = if ($startMode -cin $script:ReplayablePermissionModes) { $startMode } else { $null }
-    $result = Invoke-SessionLaunch -WorkDir $workDir -Mode $mode -SessionId $target.SessionId -Alias $aliasName -Source resume -PermissionMode $replay -Fork:$Fork -AllowUntrusted:$AllowUntrusted -TrustFolder:$TrustFolder -RunningSessions $running
+    $result = Invoke-SessionLaunch -WorkDir $workDir -Mode $mode -SessionId $target.SessionId -Alias $aliasName -Source resume -PermissionMode $replay -Fork:$Fork -TrustFolder:$TrustFolder -RunningSessions $running
     $result['chosenFrom'] = $target.Source
     if ($target.Title) { $result['title'] = $target.Title }
     if ($replay) { $result['permissionMode'] = $replay }

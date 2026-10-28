@@ -11,15 +11,11 @@
   folder that was deleted still owns its project history under ~/.claude/projects,
   and reusing its number would drop the new session into that old history.
 
-  Prints one JSON object. code: LAUNCHED | LAUNCHED_UNTRUSTED (-AllowUntrusted, the tab is on the
-  trust prompt) | UNTRUSTED_WORKSPACE | TRUST_WRITE_FAILED | PATH_NOT_FOUND | CLAUDE_NOT_FOUND | INVALID_NAME
+  Prints one JSON object. code: LAUNCHED | UNTRUSTED_WORKSPACE | TRUST_WRITE_FAILED | PATH_NOT_FOUND | CLAUDE_NOT_FOUND | INVALID_NAME
 
 .PARAMETER Name
   A display name for the session (`claude --name`): the tab title, the CLI's /resume
   picker and list-sessions.ps1 all show it. Only when the user named the session.
-
-.PARAMETER AllowUntrusted
-  Only after the user has been told the folder is untrusted and said to go ahead.
 
 .PARAMETER TrustFolder
   Marks the NEW folder (not the root) trusted in ~/.claude.json before opening, so no
@@ -28,7 +24,6 @@
 [CmdletBinding()]
 param(
     [string]$Name,
-    [switch]$AllowUntrusted,
     [switch]$TrustFolder
 )
 
@@ -46,7 +41,7 @@ try {
     # Checked BEFORE the folder is created: a fresh folder is never a repository, so
     # its trust is whatever it inherits from the root -- and refusing afterwards
     # would leave an empty folder behind on every refusal.
-    if (-not $AllowUntrusted -and -not $TrustFolder -and -not (Test-WorkspaceTrusted -Path $root)) {
+    if (-not $TrustFolder -and -not (Test-WorkspaceTrusted -Path $root)) {
         Exit-WithResult ([ordered]@{
                 ok = $false; code = 'UNTRUSTED_WORKSPACE'; path = $root
                 trustKey = (Get-TrustKey -Path $root); isRepo = [bool](Get-GitRootOrNull -Path $root)
@@ -73,7 +68,7 @@ try {
     }
     if (-not $newDir) { throw "Could not create a scratch folder under $root." }
 
-    $result = Invoke-SessionLaunch -WorkDir $newDir -Mode new -Source new -Name $Name -AllowUntrusted:$AllowUntrusted -TrustFolder:$TrustFolder
+    $result = Invoke-SessionLaunch -WorkDir $newDir -Mode new -Source new -Name $Name -TrustFolder:$TrustFolder
     # Nothing was opened, so the folder made for it goes too (Delete refuses a folder that is not empty).
     if (-not $result['ok']) { try { [IO.Directory]::Delete($newDir) } catch {} }
     Exit-WithResult $result

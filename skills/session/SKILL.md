@@ -102,9 +102,7 @@ The session opens as a new tab in the existing Windows Terminal window (a plain 
 looks first.
 
 Success codes are `LAUNCHED` here and `RESUMED` / `PICKER_OPENED` in §2. After a rerun with
-`-AllowUntrusted` in a folder that really is untrusted, each becomes `<CODE>_UNTRUSTED`: the tab is
-open but parked on the trust prompt — tell the user to answer it there. After a rerun with
-`-TrustFolder` the code stays plain and `trustWritten: true` says the folder was marked trusted first.
+`-TrustFolder`, `trustWritten: true` says the folder was marked trusted first.
 
 ### `UNTRUSTED_WORKSPACE` — no session was started (fail closed)
 
@@ -117,22 +115,17 @@ with the same meaning. When you get it:
 2. **Say what trusting it switches on**, from `ships`: the number of `hooks`, the `mcpServers` names,
    the `allowRules` and `envKeys` counts in the folder's `.claude/settings*.json` and `.mcp.json`
    (`files`). All zero and empty means it ships none of these.
-3. Offer the choices:
-   - **Open it themselves** — the user goes to the folder in a terminal, runs `claude`, and answers
-     the prompt.
-   - **Open it anyway** — rerun the same command with `-AllowUntrusted`. The trust prompt appears in
-     the new tab and **the user has to answer it.**
-   - **Trust it and open** — rerun the same command with `-TrustFolder`. The kit writes
-     `projects[<trustKey>].hasTrustDialogAccepted: true` into `~/.claude.json` itself (what answering
-     the prompt writes), so **no prompt appears** and that folder's hooks, MCP servers and settings
-     apply from this session on, for good. `new-temp-task.ps1 -TrustFolder` trusts only the new
-     folder, not the scratch root.
+3. Offer one way, and only this one — **trust it and open**: rerun the same command with
+   `-TrustFolder`. The kit writes `projects[<trustKey>].hasTrustDialogAccepted: true` into
+   `~/.claude.json` itself (what answering the prompt writes), so **no prompt appears** and that
+   folder's hooks, MCP servers and settings apply from this session on, for good.
+   `new-temp-task.ps1 -TrustFolder` trusts only the new folder, not the scratch root.
 4. If `isRepo` is true, add: **a git repository does not inherit trust from its parent folder.** Even
    under a trusted parent, the repository (`trustKey`) has to be trusted on its own — and
    `-TrustFolder` on a subfolder trusts the whole repository.
 
-`-AllowUntrusted` and `-TrustFolder` are each used **only when the user's latest message says so**
-("open it anyway" / "trust it and open", "신뢰하고 열어", "질문 없이 열어"). A request to open a folder
+`-TrustFolder` is used **only when the user's latest message says so** — a yes to that offer, "trust
+it and open", "신뢰하고 열어", "질문 없이 열어". A request to open a folder
 is not a request to trust it, and approval for one folder does not extend to another. Never write
 `~/.claude.json` any other way. `reboot-plan.ps1` has no `-TrustFolder`: there, offer to open the
 folder with `-TrustFolder` first.
@@ -295,12 +288,11 @@ changes nothing. Only `reboot-commit.ps1 -Token` freezes a copy of the resume sc
    - `alsoResume` lists the other open interactive sessions that will return (at most eight).
      Tell the user their titles/ids and folders, and that they reopen **without a prompt**; only
      the primary receives the handoff. `skipped` lists excluded sessions and reasons, including
-     any cut by the cap. Other folders must already be trusted; `-AllowUntrusted` never bypasses
-     their checks. Add `-OnlyThis` when only the primary should return. `IDLE` means the session
-     is still running but its transcript has not been written for over `-MaxIdleHours` (default
-     24) — typically a claude left in a terminal the user no longer sees. Name those (title,
-     `lastWrite`) and say they will not come back; plan again with a larger `-MaxIdleHours` only
-     if the user wants them.
+     any cut by the cap. Other folders must already be trusted. Add `-OnlyThis` when only the
+     primary should return. `IDLE` means the session is still running but its transcript has not
+     been written for over `-MaxIdleHours` (default 24) — typically a claude left in a terminal
+     the user no longer sees. Name those (title, `lastWrite`) and say they will not come back;
+     plan again with a larger `-MaxIdleHours` only if the user wants them.
    - `RESUME_PENDING` (`ok=false`) means `state.json` already holds a registered resume; report
      its `sessionId`, `workdir` and `createdAt`. Use `-Replace` only when replacing it is intended.
    - `PROMPT_STALE` (`ok=false`) means the prompt file is over 30 minutes old (or dated in the
@@ -388,13 +380,11 @@ the set that was open. Same Gate 1 as §1 (an open verb), with "what was open" a
    tab resumes its own session in the folder recorded for it, with the permission mode that session
    was started with (`permissionMode`). `bypassPermissions` is never replayed. When a result carries
    `droppedPermissionMode`, tell the user that session now runs with normal permission prompts.
-4. **Relay `results`, one line per session.** `RESUMED` means it is open again (`RESUMED_UNTRUSTED`
-   means it is open but waiting on the trust prompt in that tab). `UNTRUSTED_WORKSPACE` and
-   `PATH_NOT_FOUND` mean the same as in §1, and nothing was opened for that session. `ALREADY_RUNNING`
-   means it is already open in another tab. The top-level `RESTORED` means at least one session
-   opened; `NOT_RESTORED` means none did. Open an untrusted one only when the user explicitly says
-   so: `-Ids <sessionId> -AllowUntrusted`, or `-Ids <sessionId> -TrustFolder` to trust it with no
-   prompt (§1 — the same rules and codes).
+4. **Relay `results`, one line per session.** `RESUMED` means it is open again.
+   `UNTRUSTED_WORKSPACE` and `PATH_NOT_FOUND` mean the same as in §1, and nothing was opened for
+   that session. `ALREADY_RUNNING` means it is already open in another tab. The top-level
+   `RESTORED` means at least one session opened; `NOT_RESTORED` means none did. For an untrusted
+   one, offer `-Ids <sessionId> -TrustFolder` (§1 — the same offer, rules and codes).
 5. **Forget** — when the user does not want some of them back, this opens nothing (`FORGOTTEN`):
    ```
    pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/restore-open.ps1" -Forget <sessionId>,<sessionId>

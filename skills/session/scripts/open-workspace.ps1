@@ -6,16 +6,12 @@
 .DESCRIPTION
   An alias that is not in aliases.json is an error -- no other folder is ever
   guessed. Prints one JSON object.
-  code: LAUNCHED | LAUNCHED_UNTRUSTED (-AllowUntrusted, the tab is on the trust prompt) |
-        UNTRUSTED_WORKSPACE | TRUST_REFUSED | TRUST_WRITE_FAILED | ALIAS_NOT_FOUND | NO_ALIASES |
+  code: LAUNCHED | UNTRUSTED_WORKSPACE | TRUST_REFUSED | TRUST_WRITE_FAILED | ALIAS_NOT_FOUND | NO_ALIASES |
         PATH_NOT_FOUND | CLAUDE_NOT_FOUND | INVALID_NAME
 
 .PARAMETER Name
   A display name for the session (`claude --name`): the tab title, the CLI's /resume
   picker and list-sessions.ps1 all show it. Only when the user named the session.
-
-.PARAMETER AllowUntrusted
-  Only after the user has been told the folder is untrusted and said to go ahead.
 
 .PARAMETER TrustFolder
   Marks the folder trusted in ~/.claude.json before opening, so no trust prompt appears
@@ -26,7 +22,6 @@ param(
     [Parameter(ParameterSetName = 'Alias', Mandatory)][string]$Alias,
     [Parameter(ParameterSetName = 'Path', Mandatory)][string]$Path,
     [string]$Name,
-    [switch]$AllowUntrusted,
     [switch]$TrustFolder
 )
 
@@ -55,7 +50,7 @@ try {
         Exit-WithResult ([ordered]@{ ok = $false; code = 'PATH_NOT_FOUND'; path = $Path; alias = $aliasName; message = 'That folder does not exist. Nothing was opened.' })
     }
 
-    Exit-WithResult (Invoke-SessionLaunch -WorkDir $workDir -Mode new -Alias $aliasName -Source open -Name $Name -AllowUntrusted:$AllowUntrusted -TrustFolder:$TrustFolder)
+    Exit-WithResult (Invoke-SessionLaunch -WorkDir $workDir -Mode new -Alias $aliasName -Source open -Name $Name -TrustFolder:$TrustFolder)
 } catch {
     Write-KitResult -Ok $false -Code 'INTERNAL_ERROR' -Message $_.Exception.Message
     exit 2

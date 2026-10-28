@@ -337,9 +337,9 @@ param($Lib, $Dir, $Id)
 . $Lib
 function Start-ClaudeTerminal { param($WorkDir, $ClaudeExe, $ClaudeArgs) $script:argv = $ClaudeArgs; 'stub' }
 function Register-LaunchedSession { param($SessionId) $script:reg = $SessionId }
-$dup  = Invoke-SessionLaunch -WorkDir $Dir -Mode resume -SessionId $Id -AllowUntrusted
-$fork = Invoke-SessionLaunch -WorkDir $Dir -Mode resume -SessionId $Id -Fork -AllowUntrusted
-$bg = Invoke-SessionLaunch -WorkDir $Dir -Mode resume -SessionId $Id -AllowUntrusted -RunningSessions @([pscustomobject]@{ SessionId = $Id; Kind = 'background'; Pid = $null; Name = $null; JobId = 'ab12cd34' })
+$dup  = Invoke-SessionLaunch -WorkDir $Dir -Mode resume -SessionId $Id
+$fork = Invoke-SessionLaunch -WorkDir $Dir -Mode resume -SessionId $Id -Fork
+$bg = Invoke-SessionLaunch -WorkDir $Dir -Mode resume -SessionId $Id -RunningSessions @([pscustomobject]@{ SessionId = $Id; Kind = 'background'; Pid = $null; Name = $null; JobId = 'ab12cd34' })
 @{ dup = $dup.code; fork = $fork.code; forkId = $fork.sessionId; forkedFrom = $fork.forkedFrom; forkArgv = $script:argv; reg = $script:reg
    bg = $bg.code; bgMessage = $bg.message; bgJob = $bg.jobId } | ConvertTo-Json -Compress
 '@)
@@ -348,7 +348,7 @@ $bg = Invoke-SessionLaunch -WorkDir $Dir -Mode resume -SessionId $Id -AllowUntru
             $out = & pwsh -NoProfile -ExecutionPolicy Bypass -File $probe -Lib (Join-Path $scripts 'lib\Core.Effects.ps1') -Dir $plain -Id $newer 2>&1 | Select-Object -Last 1
         } finally { $env:CLAUDE_CODE_BIN = $noClaude }
         $o = "$out" | ConvertFrom-Json
-        (Same $o.dup 'ALREADY_RUNNING') -and ($o.fork -like 'RESUMED*') -and (Test-SessionIdFormat $o.forkId) -and ($o.forkId -ne $newer) -and
+        (Same $o.dup 'ALREADY_RUNNING') -and (Same $o.fork 'RESUMED') -and (Test-SessionIdFormat $o.forkId) -and ($o.forkId -ne $newer) -and
         (Same $o.forkedFrom $newer) -and (Same $o.reg $o.forkId) -and (Same @($o.forkArgv) @('--resume', $newer, '--fork-session', '--session-id', $o.forkId)) -and
         (Same $o.bg 'ALREADY_RUNNING') -and ($o.bgMessage -match 'claude attach ab12cd34') -and ($o.bgMessage -notmatch 'switch to that tab') -and (Same $o.bgJob 'ab12cd34')
     }
@@ -389,10 +389,10 @@ $bg = Invoke-SessionLaunch -WorkDir $Dir -Mode resume -SessionId $Id -AllowUntru
     }
     Check 'resume-session: untrusted folder fails closed' { Same (Invoke-Script 'resume-session.ps1' @('-Path', $declined)).Json.code 'UNTRUSTED_WORKSPACE' }
     Check 'resume-session: nothing to resume is an error, not a guess' {
-        Same (Invoke-Script 'resume-session.ps1' @('-Path', $declined, '-NoPicker', '-AllowUntrusted')).Json.code 'NO_RESUMABLE_SESSION'
+        Same (Invoke-Script 'resume-session.ps1' @('-Path', $declined, '-NoPicker')).Json.code 'NO_RESUMABLE_SESSION'
     }
     Check 'new-temp-task: a refused name creates no folder either' {
-        $r = Invoke-Script 'new-temp-task.ps1' @('-Name', 'R&D', '-AllowUntrusted')
+        $r = Invoke-Script 'new-temp-task.ps1' @('-Name', 'R&D', '-TrustFolder')
         (Same $r.Json.code 'INVALID_NAME') -and -not (Get-ChildItem -LiteralPath $declined -Directory)
     }
     Check 'new-temp-task: untrusted root creates no folder' {
@@ -582,12 +582,10 @@ $splat = $ArgsJson | ConvertFrom-Json -AsHashtable
         $sub = New-Item -ItemType Directory -Force -Path (Join-Path $restoreDir 'sub') | ForEach-Object FullName
         Set-OpenSessionRecord -SessionId $lostA -Cwd $sub -TranscriptPath (Join-Path (Get-ProjectTranscriptDir $restoreDir) "$lostA.jsonl") -PermissionMode 'plan' -Source compact
         $r = Invoke-Stubbed 'restore-open.ps1' '{"Ids":"1,2"}'   # one string, the way pwsh -File delivers it
-        $u = Invoke-Stubbed 'restore-open.ps1' "{`"Ids`":[`"$lostB`"],`"AllowUntrusted`":true}"
         (Same $r.Json.code 'RESTORED') -and (Same $r.Json.opened 1) -and
         (Same @($r.Json.results.code) @('UNTRUSTED_WORKSPACE', 'RESUMED')) -and (Same $r.Json.results[0].droppedPermissionMode 'bypassPermissions') -and
         (Same $r.Json.results[1].permissionMode 'plan') -and (Same $r.Tabs.Count 1) -and (Same $r.Tabs[0].dir $restoreDir) -and
-        (Same @($r.Tabs[0].argv) @('--permission-mode', 'plan', '--resume', $lostA)) -and
-        (Same $u.Json.results[0].code 'RESUMED_UNTRUSTED') -and (Same @($u.Tabs[0].argv) @('--resume', $lostB)) -and (Same $u.Json.results[0].droppedPermissionMode 'bypassPermissions')
+        (Same @($r.Tabs[0].argv) @('--permission-mode', 'plan', '--resume', $lostA))
     }
     Check 'restore-open -All: reopens every listed candidate; an untrusted one is refused' {
         $r = Invoke-Stubbed 'restore-open.ps1' '{"All":true}'
@@ -610,11 +608,11 @@ $splat = $ArgsJson | ConvertFrom-Json -AsHashtable
         $r = Invoke-Script 'open-workspace.ps1' @('-Path', $shipper)
         (Same $r.Json.code 'UNTRUSTED_WORKSPACE') -and (Same $r.Json.ships.hooks 1) -and (Same @($r.Json.ships.mcpServers) @('srv')) -and (Same $r.Json.ships.allowRules 1) -and (Same @($r.Json.ships.files).Count 2)
     }
-    Check 'open-workspace -TrustFolder: marks the folder trusted, then opens it with no prompt (LAUNCHED, not _UNTRUSTED)' {
+    Check 'open-workspace -TrustFolder: marks the folder trusted, then opens it with no prompt' {
         Use-ConfigCopy {
             param($cfg)
             $r = Invoke-Stubbed 'open-workspace.ps1' (@{ Path = $shipper; TrustFolder = $true } | ConvertTo-Json -Compress)
-            (Same $r.Json.code 'LAUNCHED') -and (Same $r.Json.trusted $true) -and (Same $r.Json.trustWritten $true) -and
+            (Same $r.Json.code 'LAUNCHED') -and (Same $r.Json.trustWritten $true) -and
             (Same $r.Json.trustKey (ConvertTo-TrustPath $shipper)) -and (Same $r.Tabs.Count 1) -and (Test-WorkspaceTrusted -Path $shipper -ConfigFile $cfg)
         }
     }
@@ -642,6 +640,16 @@ $splat = $ArgsJson | ConvertFrom-Json -AsHashtable
             try { $f = Invoke-Stubbed 'new-temp-task.ps1' '{"TrustFolder":true}' } finally { [IO.Directory]::Delete("$cfg.lock") }
             (Same $f.Json.code 'TRUST_WRITE_FAILED') -and (Same $f.Tabs.Count 0) -and -not (Get-ChildItem -LiteralPath $declined -Directory)
         })
+    }
+    Check 'restore-open -Ids -TrustFolder: trusts the session''s folder, then resumes it with no prompt; bypass is still not replayed' {
+        Use-ConfigCopy {
+            param($cfg)
+            # restore-open finds transcripts under the config dir, so the copy needs them too
+            Copy-Item -LiteralPath (Join-Path $cfgDir 'projects') -Destination (Split-Path $cfg) -Recurse
+            $u = Invoke-Stubbed 'restore-open.ps1' "{`"Ids`":[`"$lostB`"],`"TrustFolder`":true}"
+            (Same $u.Json.results[0].code 'RESUMED') -and (Same $u.Json.results[0].trustWritten $true) -and (Same @($u.Tabs[0].argv) @('--resume', $lostB)) -and
+            (Same $u.Json.results[0].droppedPermissionMode 'bypassPermissions') -and (Test-WorkspaceTrusted -Path $restoreUntrusted -ConfigFile $cfg)
+        }
     }
     Check 'restore-open: a record whose transcript moved to another project folder (/cd, a worktree) is listed, not pruned; -ForgetAll forgets all and opens nothing' {
         $own = Join-Path $sandbox 'kit-moved'
@@ -773,7 +781,7 @@ $splat = $ArgsJson | ConvertFrom-Json -AsHashtable
 param($Lib, $Dir)
 . $Lib
 function Start-ClaudeTerminal { param($WorkDir, $ClaudeExe, $ClaudeArgs) $script:argv = $ClaudeArgs; 'stub' }
-$r = Invoke-SessionLaunch -WorkDir $Dir -Mode new -Source open -Name 'blog refactor' -AllowUntrusted
+$r = Invoke-SessionLaunch -WorkDir $Dir -Mode new -Source open -Name 'blog refactor'
 @{ sessionId = $r.sessionId; argv = $script:argv } | ConvertTo-Json -Compress
 '@)
         try {
@@ -920,7 +928,7 @@ $r = Invoke-SessionLaunch -WorkDir $Dir -Mode new -Source open -Name 'blog refac
     $settingsFile = Join-Path $cfgDir 'settings.json'
     Check 'retention: no cleanupPeriodDays means the 30-day default; list-sessions warns, NO_RESUMABLE_SESSION carries it' {
         $r = Invoke-Script 'list-sessions.ps1'
-        $n = Invoke-Script 'resume-session.ps1' @('-Path', $declined, '-NoPicker', '-AllowUntrusted')
+        $n = Invoke-Script 'resume-session.ps1' @('-Path', $declined, '-NoPicker')
         $d = Get-TranscriptRetention
         (Same $d.Days 30) -and (Same $d.Source 'default') -and (Same $r.Json.retentionDays 30) -and ($r.Json.warning -match 'cleanupPeriodDays') -and
         ($r.Json.warning -match 'never 0') -and ($r.Json.warning -match 'archive-sessions') -and (Same $n.Json.code 'NO_RESUMABLE_SESSION') -and (Same $n.Json.retentionDays 30)
@@ -930,7 +938,7 @@ $r = Invoke-SessionLaunch -WorkDir $Dir -Mode new -Source open -Name 'blog refac
         $before = (Get-FileHash $settingsFile).Hash
         $r = Invoke-Script 'list-sessions.ps1'
         foreach ($run in @(@('search-sessions.ps1', '-Query', 'deploy'), @('archive-sessions.ps1', '-All'), @('archive-sessions.ps1', '-List'),
-                @('resume-session.ps1', '-Path', $declined, '-NoPicker', '-AllowUntrusted'))) { Invoke-Script $run[0] @($run | Select-Object -Skip 1) | Out-Null }
+                @('resume-session.ps1', '-Path', $declined, '-NoPicker'))) { Invoke-Script $run[0] @($run | Select-Object -Skip 1) | Out-Null }
         $large = Get-TranscriptRetention
         $untouched = (Get-FileHash $settingsFile).Hash -eq $before
         [IO.File]::WriteAllText($settingsFile, '{"cleanupPeriodDays": 0}')
@@ -1048,14 +1056,14 @@ Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'claude.exe' -ClaudeArgs 
     try {
         $env:CLAUDE_CODE_BIN = $multiAgents
         Check 'reboot-plan: only trusted interactive open sessions return, deduplicated and in recorded folders' {
-            $r = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-SessionId', $newer, '-AllowUntrusted')
+            $r = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-SessionId', $newer)
             (Same @($r.Json.alsoResume.sessionId) @($second)) -and (Same $r.Json.alsoResume[0].workdir $otherDir) -and
             (Same $r.Json.alsoResume[0].title 'second work') -and (Same @($r.Json.skipped.sessionId) @($untrusted, $cron, $background, $missingTranscript, $missingCwd, $idle))
         }
         Check 'reboot-plan: an open session idle past -MaxIdleHours (24 by default) is skipped as IDLE and reported; a longer window brings it back' {
-            $r = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-SessionId', $newer, '-AllowUntrusted')
+            $r = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-SessionId', $newer)
             $cut = @($r.Json.skipped | Where-Object { $_.sessionId -eq $idle })
-            $wide = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-SessionId', $newer, '-AllowUntrusted', '-MaxIdleHours', '96')
+            $wide = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-SessionId', $newer, '-MaxIdleHours', '96')
             (Same $cut.Count 1) -and (Same $cut[0].reason 'IDLE') -and (Same $cut[0].title 'idle work') -and [bool]$cut[0].lastWrite -and
             ($idle -notin @($r.Json.alsoResume.sessionId)) -and (Same @($wide.Json.alsoResume.sessionId) @($second, $idle))
         }

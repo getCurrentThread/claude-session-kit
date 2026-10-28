@@ -44,7 +44,6 @@ param(
     [string]$WorkDir = '',
     [int]$DelaySeconds = 30,
     [switch]$NoReboot,
-    [switch]$AllowUntrusted,
     [switch]$OnlyThis,
     [ValidateRange(1, 87600)][int]$MaxIdleHours = 24,
     [switch]$Replace,
@@ -90,7 +89,7 @@ try {
         $Prompt = 'The machine has been rebooted as planned. Read the notes left before the reboot and continue the task from where we left off.'
     }
 
-    if (-not $AllowUntrusted -and -not (Test-WorkspaceTrusted -Path $WorkDir)) {
+    if (-not (Test-WorkspaceTrusted -Path $WorkDir)) {
         Exit-WithResult ([ordered]@{
                 ok = $false; code = 'UNTRUSTED_WORKSPACE'; path = $WorkDir
                 trustKey = (Get-TrustKey -Path $WorkDir); isRepo = [bool](Get-GitRootOrNull -Path $WorkDir)

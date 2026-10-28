@@ -203,13 +203,10 @@ reboot-commit.ps1 -Token <t>
 folder's `.claude/settings.json` can run hooks and MCP servers. A tab opened by a launcher tends to sit
 on that prompt unseen, so the kit checks `~/.claude.json` first and, for an untrusted folder,
 **refuses to start the session and says so** — listing what the folder ships (`ships`: hooks, MCP
-servers, allow rules, env keys). You then pick one of three:
-
-- open the folder yourself once and answer the prompt;
-- tell Claude to go ahead (`-AllowUntrusted`): the prompt appears in the new tab and you answer it;
-- tell Claude to trust it and open it (`-TrustFolder`): the kit writes
-  `projects[<folder>].hasTrustDialogAccepted: true` itself — what answering the prompt writes — and
-  the tab starts with **no prompt**. The folder's hooks, MCP servers and settings then apply, for good.
+servers, allow rules, env keys) — and offers one way on: trust it and open it (`-TrustFolder`). Say
+yes and the kit writes `projects[<folder>].hasTrustDialogAccepted: true` itself — what answering the
+prompt writes — and the tab starts with **no prompt**. The folder's hooks, MCP servers and settings
+then apply, for good.
 
 `-TrustFolder` is the kit's only write to `~/.claude.json`. It takes the lock Claude Code itself uses
 for that file (`~/.claude.json.lock`), re-reads the file inside it, changes that one key, replaces the

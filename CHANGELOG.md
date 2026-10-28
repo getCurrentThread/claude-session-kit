@@ -13,6 +13,10 @@
   does not parse fails closed (`TRUST_WRITE_FAILED`). `new-temp-task` trusts only the new folder.
   Checked against Claude Code 2.1.311: a folder trusted this way starts without the prompt, and the
   entry survives the CLI's own later writes of the file.
+- **An untrusted folder gets one offer: `-TrustFolder`.** The skill no longer offers to open the
+  folder yourself or to open the tab on the trust prompt. `-AllowUntrusted` is gone from every
+  script (`reboot-plan` included), with the `LAUNCHED_UNTRUSTED` / `RESUMED_UNTRUSTED` /
+  `PICKER_OPENED_UNTRUSTED` codes and the launch result's `trusted` field, which is now always true.
 - **`UNTRUSTED_WORKSPACE` says what trusting would switch on**: `ships` lists the hooks count, MCP
   server names, allow-rule and env-key counts from the folder's `.claude/settings*.json` and
   `.mcp.json`.
