@@ -42,11 +42,7 @@ try {
     # its trust is whatever it inherits from the root -- and refusing afterwards
     # would leave an empty folder behind on every refusal.
     if (-not $TrustFolder -and -not (Test-WorkspaceTrusted -Path $root)) {
-        Exit-WithResult ([ordered]@{
-                ok = $false; code = 'UNTRUSTED_WORKSPACE'; path = $root
-                trustKey = (Get-TrustKey -Path $root); isRepo = [bool](Get-GitRootOrNull -Path $root)
-                message = 'The scratch root is not trusted in Claude Code. No folder was created and no session was started.'
-            })
+        Exit-WithResult (New-UntrustedRefusal -Path $root -Message 'The scratch root is not trusted in Claude Code. No folder was created and no session was started.')
     }
 
     $refusal = Get-NameRefusal $Name   # before the folder exists, for the same reason

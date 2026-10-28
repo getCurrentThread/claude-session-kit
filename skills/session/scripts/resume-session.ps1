@@ -53,23 +53,9 @@ $ErrorActionPreference = 'Stop'
 try {
     Initialize-KitState | Out-Null
 
-    $aliasName = $null
-    if ($Alias) {
-        $entry = Find-Alias -Name $Alias
-        if (-not $entry) {
-            Exit-WithResult ([ordered]@{ ok = $false; code = 'ALIAS_NOT_FOUND'; alias = $Alias; known = @(Get-AliasTable | ForEach-Object name); message = "Alias '$Alias' is not registered. Nothing was opened." })
-        }
-        $aliasName = $entry.name
-        $Path = $entry.path
-    }
-
-    $scope = $null
-    if ($Path) {
-        $scope = Resolve-WorkspacePath $Path
-        if (-not $scope) {
-            Exit-WithResult ([ordered]@{ ok = $false; code = 'PATH_NOT_FOUND'; path = $Path; alias = $aliasName; message = 'That folder does not exist. Nothing was opened.' })
-        }
-    }
+    $where = Resolve-AliasOrPath -Alias $Alias -Path $Path -Suffix ' Nothing was opened.'
+    if ($where.Refusal) { Exit-WithResult $where.Refusal }
+    $scope = $where.Scope; $aliasName = $where.Alias
 
     # Asked once: the ladder skips open sessions, and the launch refuses one. A fork
     # skips nothing: forking an open session is what -Fork is for.

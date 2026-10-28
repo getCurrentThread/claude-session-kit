@@ -31,26 +31,13 @@ $ErrorActionPreference = 'Stop'
 try {
     Initialize-KitState | Out-Null
 
-    $aliasName = $null
-    if ($PSCmdlet.ParameterSetName -eq 'Alias') {
-        $table = @(Get-AliasTable)
-        if ($table.Count -eq 0) {
-            Exit-WithResult ([ordered]@{ ok = $false; code = 'NO_ALIASES'; file = (Get-KitPath aliases); message = 'No aliases are registered yet.' })
-        }
-        $entry = $table | Where-Object { $_.name -eq $Alias } | Select-Object -First 1
-        if (-not $entry) {
-            Exit-WithResult ([ordered]@{ ok = $false; code = 'ALIAS_NOT_FOUND'; alias = $Alias; known = @($table | ForEach-Object name); message = "Alias '$Alias' is not registered. Nothing was opened." })
-        }
-        $aliasName = $entry.name
-        $Path = $entry.path
+    if ($Alias -and @(Get-AliasTable).Count -eq 0) {
+        Exit-WithResult ([ordered]@{ ok = $false; code = 'NO_ALIASES'; file = (Get-KitPath aliases); message = 'No aliases are registered yet.' })
     }
+    $where = Resolve-AliasOrPath -Alias $Alias -Path $Path -Suffix ' Nothing was opened.'
+    if ($where.Refusal) { Exit-WithResult $where.Refusal }
 
-    $workDir = Resolve-WorkspacePath $Path
-    if (-not $workDir) {
-        Exit-WithResult ([ordered]@{ ok = $false; code = 'PATH_NOT_FOUND'; path = $Path; alias = $aliasName; message = 'That folder does not exist. Nothing was opened.' })
-    }
-
-    Exit-WithResult (Invoke-SessionLaunch -WorkDir $workDir -Mode new -Alias $aliasName -Source open -Name $Name -TrustFolder:$TrustFolder)
+    Exit-WithResult (Invoke-SessionLaunch -WorkDir $where.Scope -Mode new -Alias $where.Alias -Source open -Name $Name -TrustFolder:$TrustFolder)
 } catch {
     Write-KitResult -Ok $false -Code 'INTERNAL_ERROR' -Message $_.Exception.Message
     exit 2

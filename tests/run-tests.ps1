@@ -396,7 +396,12 @@ $bg = Invoke-SessionLaunch -WorkDir $Dir -Mode resume -SessionId $Id -RunningSes
     }
     Check 'new-temp-task: untrusted root creates no folder' {
         $r = Invoke-Script 'new-temp-task.ps1'
-        (Same $r.Json.code 'UNTRUSTED_WORKSPACE') -and -not (Get-ChildItem -LiteralPath $declined -Directory)
+        (Same $r.Json.code 'UNTRUSTED_WORKSPACE') -and ($null -ne $r.Json.ships) -and -not (Get-ChildItem -LiteralPath $declined -Directory)
+    }
+    Check 'list-sessions / search-sessions: unknown alias and missing folder are refused like the launchers' {
+        $a = Invoke-Script 'list-sessions.ps1' @('-Alias', 'typo')
+        $p = Invoke-Script 'search-sessions.ps1' @('-Query', 'x', '-Path', (Join-Path $sandbox 'no-such-folder'))
+        (Same $a.Json.code 'ALIAS_NOT_FOUND') -and ('good' -in $a.Json.known) -and (Same $p.Json.code 'PATH_NOT_FOUND') -and (Same $p.ExitCode 1)
     }
     Check 'list-sessions: registry first, then scan, no automation' {
         # It asks which sessions are running: the stand-in answers, since the real CLI rewrites the sandbox's .claude.json.
@@ -996,7 +1001,10 @@ Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'claude.exe' -ClaudeArgs 
     $env:CLAUDE_CODE_BIN = $agentsBad
     $promptFile = Join-Path $sandbox 'prompt.txt'
     [IO.File]::WriteAllText($promptFile, "재부팅 후 이어서: SECRET-MARKER-123`nnext step")
-    Check 'reboot-plan: untrusted folder is refused' { Same (Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $declined)).Json.code 'UNTRUSTED_WORKSPACE' }
+    Check 'reboot-plan: untrusted folder is refused, with what it ships' {
+        $r = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $declined)
+        (Same $r.Json.code 'UNTRUSTED_WORKSPACE') -and ($null -ne $r.Json.ships)
+    }
     $plan = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-PromptFile', $promptFile, '-DelaySeconds', '5')
     Check 'reboot-plan: plans the newest interactive session, never the cron one' {
         (Same $plan.ExitCode 0) -and (Same $plan.Json.code 'REBOOT_PLANNED') -and (Same $plan.Json.sessionId $newer) -and (Same $plan.Json.sessionMode 'resume')

@@ -90,11 +90,7 @@ try {
     }
 
     if (-not (Test-WorkspaceTrusted -Path $WorkDir)) {
-        Exit-WithResult ([ordered]@{
-                ok = $false; code = 'UNTRUSTED_WORKSPACE'; path = $WorkDir
-                trustKey = (Get-TrustKey -Path $WorkDir); isRepo = [bool](Get-GitRootOrNull -Path $WorkDir)
-                message = 'This folder is not trusted in Claude Code, so a resumed session would stop on the trust prompt. Nothing was planned.'
-            })
+        Exit-WithResult (New-UntrustedRefusal -Path $WorkDir -Message 'This folder is not trusted in Claude Code, so a resumed session would stop on the trust prompt. Nothing was planned.')
     }
 
     $claude = Resolve-ClaudeBinary
@@ -117,13 +113,7 @@ try {
     # less would only fail after the machine is already down.
     function Get-SessionProblem([string]$Id) {
         $t = Join-Path $projectDir ($Id + '.jsonl')
-        if (-not (Test-Path -LiteralPath $t)) {
-            $t = $null
-            foreach ($d in @(Get-ChildItem -LiteralPath (Get-ClaudeProjectsDir) -Directory -ErrorAction SilentlyContinue)) {
-                $c = Join-Path $d.FullName ($Id + '.jsonl')
-                if (Test-Path -LiteralPath $c) { $t = $c; break }
-            }
-        }
+        if (-not (Test-Path -LiteralPath $t -PathType Leaf)) { $t = Find-SessionTranscript -SessionId $Id }
         if (-not $t) { return @{ message = 'No transcript exists for that session id, so there would be nothing to resume after the reboot.' } }
         $rec = Get-ClaudeSessionRecord -TranscriptPath $t
         $ok = $rec.Kind -eq 'interactive' -or ($rec.Kind -eq 'sidecar' -and $rec.LastWrite -ge $live)
@@ -170,10 +160,8 @@ try {
             $reason = $null; $rec = $null; $cwd = $null
             if ($row.Kind -ne 'interactive') { $reason = 'NOT_INTERACTIVE' }
             else {
-                foreach ($d in @(Get-ChildItem -LiteralPath (Get-ClaudeProjectsDir) -Directory -ErrorAction SilentlyContinue)) {
-                    $t = Join-Path $d.FullName ($id + '.jsonl')
-                    if (Test-Path -LiteralPath $t -PathType Leaf) { $rec = Get-ClaudeSessionRecord -TranscriptPath $t; break }
-                }
+                $t = Find-SessionTranscript -SessionId $id
+                if ($t) { $rec = Get-ClaudeSessionRecord -TranscriptPath $t }
                 if (-not $rec) { $reason = 'TRANSCRIPT_NOT_FOUND' }
                 elseif ($rec.Kind -ne 'interactive') { $reason = 'NOT_INTERACTIVE' }
                 elseif (-not $rec.Cwd -or -not ($cwd = Resolve-WorkspacePath $rec.Cwd)) { $reason = 'PATH_NOT_FOUND' }

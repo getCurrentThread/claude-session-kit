@@ -19,7 +19,8 @@
   `PICKER_OPENED_UNTRUSTED` codes and the launch result's `trusted` field, which is now always true.
 - **`UNTRUSTED_WORKSPACE` says what trusting would switch on**: `ships` lists the hooks count, MCP
   server names, allow-rule and env-key counts from the folder's `.claude/settings*.json` and
-  `.mcp.json`.
+  `.mcp.json` — from every script that refuses one, `new-temp-task` (the scratch root's) and
+  `reboot-plan` included.
 - `new-temp-task` removes the scratch folder it just created when the launch fails.
 
 - **A session launched from a background session gets its own name.** A background session

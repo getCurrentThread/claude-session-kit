@@ -75,13 +75,7 @@ function Invoke-SessionLaunch {
 
     $trusted = Test-WorkspaceTrusted -Path $WorkDir
     if (-not $trusted -and -not $TrustFolder) {
-        return [ordered]@{
-            ok = $false; code = 'UNTRUSTED_WORKSPACE'; path = $WorkDir
-            trustKey = (Get-TrustKey -Path $WorkDir)
-            isRepo = [bool](Get-GitRootOrNull -Path $WorkDir)
-            ships = (Get-WorkspaceShips -Path $WorkDir)
-            message = 'This folder is not trusted in Claude Code yet. No session was started.'
-        }
+        return (New-UntrustedRefusal -Path $WorkDir -Message 'This folder is not trusted in Claude Code yet. No session was started.')
     }
 
     $claude = Resolve-ClaudeBinary

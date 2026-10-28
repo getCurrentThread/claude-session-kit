@@ -30,18 +30,9 @@ $ErrorActionPreference = 'Stop'
 try {
     Initialize-KitState | Out-Null
 
-    if ($Alias) {
-        $entry = Find-Alias -Name $Alias
-        if (-not $entry) {
-            Exit-WithResult ([ordered]@{ ok = $false; code = 'ALIAS_NOT_FOUND'; alias = $Alias; known = @(Get-AliasTable | ForEach-Object name); message = "Alias '$Alias' is not registered." })
-        }
-        $Path = $entry.path
-    }
-    $scope = $null
-    if ($Path) {
-        $scope = Resolve-WorkspacePath $Path
-        if (-not $scope) { Exit-WithResult ([ordered]@{ ok = $false; code = 'PATH_NOT_FOUND'; path = $Path; message = 'That folder does not exist.' }) }
-    }
+    $where = Resolve-AliasOrPath -Alias $Alias -Path $Path
+    if ($where.Refusal) { Exit-WithResult $where.Refusal }
+    $scope = $where.Scope
 
     $seen = @{}
     $rows = [System.Collections.Generic.List[object]]::new()

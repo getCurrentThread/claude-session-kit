@@ -42,18 +42,9 @@ try {
     foreach ($t in ($Query -split '\s+')) { if ($t -and -not ($terms -contains $t)) { $terms.Add($t) } }
     if ($terms.Count -eq 0) { Exit-WithResult ([ordered]@{ ok = $false; code = 'EMPTY_QUERY'; message = 'Give at least one search term.' }) }
 
-    if ($Alias) {
-        $entry = Find-Alias -Name $Alias
-        if (-not $entry) {
-            Exit-WithResult ([ordered]@{ ok = $false; code = 'ALIAS_NOT_FOUND'; alias = $Alias; known = @(Get-AliasTable | ForEach-Object name); message = "Alias '$Alias' is not registered." })
-        }
-        $Path = $entry.path
-    }
-    $scope = $null
-    if ($Path) {
-        $scope = Resolve-WorkspacePath $Path
-        if (-not $scope) { Exit-WithResult ([ordered]@{ ok = $false; code = 'PATH_NOT_FOUND'; path = $Path; message = 'That folder does not exist.' }) }
-    }
+    $where = Resolve-AliasOrPath -Alias $Alias -Path $Path
+    if ($where.Refusal) { Exit-WithResult $where.Refusal }
+    $scope = $where.Scope
 
     $candidates = @(Get-ClaudeSessions -Path $scope -Days $Days)
 

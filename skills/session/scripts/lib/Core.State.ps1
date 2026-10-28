@@ -249,6 +249,16 @@ function Get-WorkspaceShips {
     return [ordered]@{ files = @($files); hooks = $hooks; mcpServers = @($mcp | Select-Object -Unique); allowRules = $allow; envKeys = $envKeys }
 }
 
+# The refusal for a folder Claude Code does not trust yet, with what trusting it would switch on.
+function New-UntrustedRefusal {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Message)
+    return [ordered]@{
+        ok = $false; code = 'UNTRUSTED_WORKSPACE'; path = $Path
+        trustKey = (Get-TrustKey -Path $Path); isRepo = [bool](Get-GitRootOrNull -Path $Path)
+        ships = (Get-WorkspaceShips -Path $Path); message = $Message
+    }
+}
+
 # The one writer of ~/.claude.json, for -TrustFolder. It writes what answering the
 # trust prompt writes -- projects[<trust key>].hasTrustDialogAccepted = true -- under
 # the lock Claude Code itself takes for that file (a `<file>.lock` DIRECTORY, the
@@ -347,6 +357,28 @@ function Find-Alias {
     param([Parameter(Mandatory)][string]$Name)
     foreach ($a in @(Get-AliasTable)) { if ($a.name -eq $Name) { return $a } }
     return $null
+}
+
+# A script's -Alias / -Path to the folder it works in. Scope is $null when neither was
+# given; Refusal is the ALIAS_NOT_FOUND / PATH_NOT_FOUND to print, -Suffix appended to
+# its message. An alias that is not registered is an error: no other folder is guessed.
+function Resolve-AliasOrPath {
+    param([string]$Alias, [string]$Path, [string]$Suffix = '')
+    $out = [pscustomobject]@{ Scope = $null; Alias = $null; Refusal = $null }
+    if ($Alias) {
+        $entry = Find-Alias -Name $Alias
+        if (-not $entry) {
+            $out.Refusal = [ordered]@{ ok = $false; code = 'ALIAS_NOT_FOUND'; alias = $Alias; known = @(Get-AliasTable | ForEach-Object name); message = "Alias '$Alias' is not registered.$Suffix" }
+            return $out
+        }
+        $out.Alias = $entry.name
+        $Path = $entry.path
+    }
+    if ($Path) {
+        $out.Scope = Resolve-WorkspacePath $Path
+        if (-not $out.Scope) { $out.Refusal = [ordered]@{ ok = $false; code = 'PATH_NOT_FOUND'; path = $Path; alias = $out.Alias; message = "That folder does not exist.$Suffix" } }
+    }
+    return $out
 }
 
 function Get-TempTaskSettings {
