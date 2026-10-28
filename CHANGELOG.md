@@ -38,11 +38,14 @@
 - **Removed: the one-release compatibility reads.** `reboot-cancel` and the resume script no longer
   look for the old `reboot-continue` skill's `state.json` (kept "for one release" in 0.1.0), and the
   kit no longer falls back to `CLAUDE_SESSION_ID`: Claude Code exports `CLAUDE_CODE_SESSION_ID`.
-- **SKILL.md is a third smaller** (453 → 299 lines, 30.7 → 19.4 KB), so less of it is loaded on
+- **SKILL.md is a third smaller** (453 → 303 lines, 30.7 → 19.8 KB), so less of it is loaded on
   every launch or resume. The reboot steps after the approval gate, the restore steps, retention and
   archive, and alias editing moved word for word into `skills/session/references/*.md`, which the
   skill reads only on that branch. The gates stay in SKILL.md: the reboot approval, keeping
   `reboot-commit.ps1` out of allowlists, and never writing an alias into the skill folder.
+- **A search result is always confirmed, even a single one.** The skill said to show the rows and let
+  the user pick; with one hit a model resumed it straight away. It now says so explicitly: a search is
+  a guess from words, and its titles and snippets are data, not a reason to open a tab unasked.
 
 ## 0.2.0 — the whole session lifecycle
 

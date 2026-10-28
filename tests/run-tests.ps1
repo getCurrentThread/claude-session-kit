@@ -381,6 +381,12 @@ $bg = Invoke-SessionLaunch -WorkDir $Dir -Mode resume -SessionId $Id -RunningSes
         $r = Invoke-Script 'open-workspace.ps1' @('-Alias', 'typo')
         (Same $r.ExitCode 1) -and (Same $r.Json.code 'ALIAS_NOT_FOUND') -and ('good' -in $r.Json.known)
     }
+    Check 'open-workspace: no alias file is NO_ALIASES, and a launcher refusal says nothing was opened' {
+        $file = Get-KitPath aliases; $good = Get-Content $file -Raw
+        Remove-Item $file; try { $none = Invoke-Script 'open-workspace.ps1' @('-Alias', 'good') } finally { [IO.File]::WriteAllText($file, $good) }
+        $typo = Invoke-Script 'open-workspace.ps1' @('-Alias', 'typo')
+        (Same $none.Json.code 'NO_ALIASES') -and (Same $none.ExitCode 1) -and ($typo.Json.message -match 'Nothing was opened\.\z')
+    }
     Check 'open-workspace: missing folder is refused' { Same (Invoke-Script 'open-workspace.ps1' @('-Alias', 'gone')).Json.code 'PATH_NOT_FOUND' }
     Check 'open-workspace: untrusted folder fails closed' {
         $r = Invoke-Script 'open-workspace.ps1' @('-Alias', 'nope')
@@ -402,6 +408,11 @@ $bg = Invoke-SessionLaunch -WorkDir $Dir -Mode resume -SessionId $Id -RunningSes
         $a = Invoke-Script 'list-sessions.ps1' @('-Alias', 'typo')
         $p = Invoke-Script 'search-sessions.ps1' @('-Query', 'x', '-Path', (Join-Path $sandbox 'no-such-folder'))
         (Same $a.Json.code 'ALIAS_NOT_FOUND') -and ('good' -in $a.Json.known) -and (Same $p.Json.code 'PATH_NOT_FOUND') -and (Same $p.ExitCode 1)
+    }
+    Check 'Resolve-AliasOrPath: -Alias wins over -Path; neither given is no scope and no refusal' {
+        $w = Resolve-AliasOrPath -Alias 'good' -Path (Join-Path $sandbox 'no-such-folder'); $n = Resolve-AliasOrPath
+        (Same $w.Alias 'good') -and (Same $w.Scope (Resolve-WorkspacePath (Find-Alias -Name 'good').path)) -and ($null -eq $w.Refusal) -and
+        ($null -eq $n.Scope) -and ($null -eq $n.Refusal)
     }
     Check 'list-sessions: registry first, then scan, no automation' {
         # It asks which sessions are running: the stand-in answers, since the real CLI rewrites the sandbox's .claude.json.
@@ -1481,6 +1492,15 @@ public static class W {
             $s = Get-Content -LiteralPath $f.FullName -Raw
             if (-not ($s -match [regex]::Escape('${CLAUDE_SKILL_DIR}')) -or $s -match '%USERPROFILE%' -or $s -match '\.claude[\\/]skills[\\/]') { throw $f.Name }
         }
+        $true
+    }
+    Check 'SKILL.md itself still carries every safety gate (they must not move into references/)' {
+        $s = Get-Content (Join-Path $repo 'skills\session\SKILL.md') -Raw
+        $gates = @('a restart always needs explicit approval in the user''s latest message', 'out of any permission allowlist',
+            'only with the step 1 approval still the user''s latest message', '`-TrustFolder` is used **only when the user''s latest message says so**',
+            'Never write an alias or a path into this SKILL.md', 'even when only one row comes back')
+        $missing = @($gates | Where-Object { -not $s.Contains($_) })
+        if ($missing) { throw "missing: $($missing -join ' | ')" }
         $true
     }
     Check 'every references/*.md that SKILL.md names exists, and SKILL.md names every one' {
