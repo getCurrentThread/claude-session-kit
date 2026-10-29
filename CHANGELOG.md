@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 — a hand-off can message back
 
 - **Both ends of a hand-off are named, so the two sessions can SendMessage each other.** A session
   started without a name gets one the CLI makes up and the kit never sees, and a first prompt arrives
