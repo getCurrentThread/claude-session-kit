@@ -5,7 +5,7 @@ whole life of a session — start, find, reopen, carry across a reboot, bring ba
 
 | | You say | What happens |
 |---|---|---|
-| **Launch** | "open a new claude session", "새 임시 작업 켜줘", "`<alias>` 폴더 켜줘" | A new Windows Terminal tab opens in a fresh scratch folder or a registered workspace, running `claude` (optionally under a name). |
+| **Launch** | "open a new claude session", "새 임시 작업 켜줘", "`<alias>` 폴더 켜줘", "`<alias>`에 Opus xhigh로 켜서 이거 넘겨줘" | A new Windows Terminal tab opens in a fresh scratch folder or a registered workspace, running `claude` (optionally under a name, on the model and effort you name, with a first prompt that hands it the work). |
 | **Resume** | "reopen my last session", "아까 그 세션 다시 켜줘", "배포 얘기하던 세션 찾아서 켜줘" | An earlier session — picked from the list, by title, or found by what was said in it — is reopened in a new tab, in the folder it was recorded in. A session that is already open is never opened twice. |
 | **Reboot and continue** | "reboot and continue", "재부팅하고 이어서 해" | State is saved, a one-shot resume is registered, Windows restarts, and after you log in the **same session continues, already told what to do next** — and the other sessions that were open come back in their own tabs. |
 | **Restore** | "reopen the sessions I had open", "아까 열려 있던 세션들 다시 켜줘" | After a crash, a closed window or an unplanned restart, the sessions that were open are listed and reopened, each in its own folder with the permission mode it was started with. |
@@ -94,6 +94,17 @@ tab that inherits it joins the job and takes, and keeps following, the job's nam
 tab title and this kit's lists all show it. A name with quotes, backslashes, `%` or `& | < > ^ !` is
 refused (`INVALID_NAME`): Windows Terminal re-splits the command line it hands on and would turn
 those into extra `claude` arguments.
+
+`-Model`, `-Effort` and `-Prompt:'<text>'` start the session on the model and effort you named (the
+kit never picks either) with a first message — typically "read this hand-off note and follow it",
+the note written beforehand. The prompt rides on that same command line. Measured on Windows
+Terminal 1.24, it keeps line breaks, `;`, a leading `-`, Hangul, emoji and 8000 characters, but
+changes a `"`, a `%NAME%` that is defined, a tab with no space beside it and a trailing backslash
+after a space. Those shapes are refused (`INVALID_PROMPT`) rather than repaired — any pair of `%`
+signs, since the kit cannot know which names the tab defines — as are blank prompts and prompts over
+8000 characters, before anything is created. The prompt is never printed or logged
+(`promptChars` only). Behind an npm `.cmd` shim a prompt is refused (`CLAUDE_IS_SHIM`); a model or an
+effort alone is fine. Keep secrets out of the prompt: a command line shows in the process list.
 
 **Resume.** `resume-session.ps1` picks a session in this order: the **launcher registry** → a **scan of
 interactive transcripts from the last 30 days** → the **CLI's own picker** (`claude --resume`) in that
@@ -240,8 +251,8 @@ All under `skills/session/scripts/`, all print one JSON object (`ok`, `code`, `m
 | `list-sessions.ps1` | sessions that could be resumed, with title, `running` and the retention setting | none |
 | `search-sessions.ps1 -Query:` | sessions by title, folder name or message text | none |
 | `list-candidates.ps1` | most-used folders (`alias` is set on those already registered) | none |
-| `new-temp-task.ps1 [-Name]` | new scratch folder + new session | folder, terminal tab |
-| `open-workspace.ps1 -Alias\|-Path [-Name]` | new session in a workspace | terminal tab |
+| `new-temp-task.ps1 [-Name] [-Model] [-Effort] [-Prompt:]` | new scratch folder + new session | folder, terminal tab |
+| `open-workspace.ps1 -Alias\|-Path [-Name] [-Model] [-Effort] [-Prompt:]` | new session in a workspace | terminal tab |
 | `resume-session.ps1 [-Alias\|-Path] [-SessionId] [-Fork]` | reopen a session | terminal tab |
 | `restore-open.ps1 [-All\|-Ids\|-Forget\|-ForgetAll]` | sessions left open by a crash or closed window | terminal tabs; prunes records that can never be reopened; `-Forget` deletes records |
 | `archive-sessions.ps1 [-All] [-List]` | back up transcripts | copies into `archive\` |
@@ -263,6 +274,13 @@ The hook is fed recorded hook input on stdin; the multi-session resume runs agai
 `wt` and `claude` under both PowerShell 7 and Windows PowerShell 5.1. The resume script is run for real, but only against stand-ins for `claude` — a `.cmd`
 shim and a small argv-recording `.exe` — fed a prompt full of quotes, `&`, `%VAR%` and line breaks.
 Forged `plan.json` files are committed (`-Simulate`) to check that each one is refused.
+
+A launch's first prompt is tested up to the first hop only: with the recording `.exe` standing in
+for `wt`, every prompt shape that passes reaches it as the exact argument list, under PowerShell 7 and
+in Legacy argument mode (what 7.0–7.2 use). The second hop — `wt` rebuilding the child's command
+line — happens inside Windows Terminal, where no stand-in can see it. It was measured once by hand
+(Windows Terminal 1.24, a real tab, an argv-recording child), and the tests pin the refusal list to
+what that measurement showed; they do not re-check a live `wt`.
 
 ## Uninstall
 
@@ -293,7 +311,10 @@ Windows용 Claude Code 플러그인입니다. 스킬 하나(`claude-session-kit:
 재개 → 재부팅 연속 → 크래시 복구를 맡습니다.
 
 - **새 세션 열기** — "새 임시 작업 켜줘", "`<별칭>` 폴더 켜줘". Windows Terminal 새 탭에서 `claude`를
-  띄웁니다. `-Name`으로 이름을 붙이면 CLI 피커에도 같은 이름이 보입니다.
+  띄웁니다. `-Name`으로 이름을 붙이면 CLI 피커에도 같은 이름이 보입니다. "Opus xhigh로 켜서 이거
+  넘겨줘"처럼 말하면 `-Model`·`-Effort`·`-Prompt`로 그 모델·effort로 켜고 첫 프롬프트로 일을 넘깁니다
+  (모델·effort는 말한 것만 씁니다). 긴 지시는 handoff 노트에 쓰고 프롬프트는 그 노트를 가리킵니다.
+  프롬프트는 wt 명령줄을 타므로 `"`, `%이름%`, 탭, 끝 `\`는 거절하고, 본문은 출력·로그에 남기지 않습니다.
 - **이전 세션 다시 열기** — "아까 그 세션 다시 켜줘". 런처 레지스트리 → 최근 30일 transcript 스캔 →
   CLI 기본 피커 순으로 고릅니다. 제목(`/rename` > 자동 제목 > 첫 입력)과 내용 검색
   (`search-sessions.ps1`)으로도 찾습니다. 이미 열려 있는 세션은 두 번 열지 않고(`ALREADY_RUNNING`),

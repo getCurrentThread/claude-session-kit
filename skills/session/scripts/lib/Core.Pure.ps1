@@ -185,12 +185,55 @@ function Get-NameRefusal([string]$Name) {
     }
 }
 
+# A model goes through as the user named it: an alias (opus), a full id, a [1m] suffix, a
+# Bedrock or Vertex id. Never checked against a list, which changes with every release;
+# only its characters are, so it stays one plain word on wt's command line.
+function Get-ModelRefusal([string]$Model) {
+    if (-not $Model -or $Model -match '\A[A-Za-z0-9][A-Za-z0-9._:@/\[\]-]*\z') { return $null }
+    return [ordered]@{
+        ok = $false; code = 'INVALID_MODEL'; model = $Model
+        message = 'A model is one word of letters, digits and . _ : @ / [ ] - that does not start with - (an alias such as opus, or a full model id). Nothing was opened.'
+    }
+}
+
+# What `claude --effort` takes. -cin: 'XHIGH' would pass a case-insensitive check and then fail in the tab.
+$script:EffortLevels = @('low', 'medium', 'high', 'xhigh', 'max')
+function Get-EffortRefusal([string]$Effort) {
+    if (-not $Effort -or $Effort -cin $script:EffortLevels) { return $null }
+    return [ordered]@{
+        ok = $false; code = 'INVALID_EFFORT'; effort = $Effort; allowed = $script:EffortLevels
+        message = 'An effort level is one of low, medium, high, xhigh, max, in lower case. Nothing was opened.'
+    }
+}
+
+# A first prompt rides on wt's command line as well. Measured (Windows Terminal 1.24,
+# pwsh 7.6, each shape as the last argument of `wt -w 0 nt -- <exe> ... -- <prompt>`): a
+# double quote, a %NAME% that is defined, a tab with no space in the prompt and a trailing
+# backslash after a space arrive changed; line breaks, ; and \;, a leading -, & | < > ^ !,
+# Hangul, emoji and 8000 characters arrive intact. pwsh in Legacy argument mode (what
+# 7.0-7.2 always use) loses quotes before wt sees them; Start-Process kept every shape.
+# So those shapes are refused, never repaired, and the prompt is never echoed back.
+$script:MaxPromptChars = 8000
+function Get-PromptRefusal([string]$Prompt) {
+    if (-not $Prompt) { return $null }
+    $why = if ([string]::IsNullOrWhiteSpace($Prompt)) { 'is blank' }
+    elseif ($Prompt.Length -gt $script:MaxPromptChars) { "is longer than $script:MaxPromptChars characters" }
+    elseif ($Prompt -match '"|%[^%]*%|[\x00-\x09\x0B\x0C\x0E-\x1F\x7F]|\\\z') { 'holds a double quote, two % signs, a tab or another control character, or ends with a backslash' }
+    if (-not $why) { return $null }
+    return [ordered]@{
+        ok = $false; code = 'INVALID_PROMPT'; promptChars = $Prompt.Length
+        message = "The prompt $why, so it would not reach the new session as written. Nothing was opened. Rephrase it, or put long instructions in a file and pass a short prompt that points at it."
+    }
+}
+
 function Get-ClaudeArgs {
     param(
         [Parameter(Mandatory)][ValidateSet('new', 'resume', 'picker')][string]$Mode,
         [string]$SessionId,
         [string]$Prompt,
         [string]$Name,
+        [string]$Model,
+        [string]$Effort,
         [string]$PermissionMode,
         [switch]$Fork,
         # the id the fork is created under (the CLI takes --session-id with --resume only alongside --fork-session)
@@ -205,6 +248,14 @@ function Get-ClaudeArgs {
     if ($Name) {
         if (Get-NameRefusal $Name) { throw (Get-NameRefusal $Name).message }
         $argv.Add('--name'); $argv.Add($Name)
+    }
+    if ($Model) {
+        if (Get-ModelRefusal $Model) { throw (Get-ModelRefusal $Model).message }
+        $argv.Add('--model'); $argv.Add($Model)
+    }
+    if ($Effort) {
+        if (Get-EffortRefusal $Effort) { throw (Get-EffortRefusal $Effort).message }
+        $argv.Add('--effort'); $argv.Add($Effort)
     }
     switch ($Mode) {
         'new' {
@@ -231,6 +282,8 @@ function Get-ClaudeArgs {
         }
     }
     if ($Prompt) {
+        # the message never holds the prompt: a script relays it as INTERNAL_ERROR
+        if (Get-PromptRefusal $Prompt) { throw (Get-PromptRefusal $Prompt).message }
         # `--resume` takes an OPTIONAL value, so a bare prompt is liable to be
         # consumed as the resume target. '--' ends option parsing.
         $argv.Add('--'); $argv.Add($Prompt)

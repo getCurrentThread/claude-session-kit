@@ -4,7 +4,9 @@ description: >-
   Windows session tools for Claude Code, four jobs in one skill. (1) LAUNCH a NEW session in a
   Windows Terminal tab (a fresh scratch folder or a registered workspace alias) only on an
   explicit launch verb with "Claude"/"session" or a workspace (클로드 켜줘, 새 임시 작업 켜줘,
-  <별칭> 폴더 켜줘, open a new claude session). (2) RESUME an EARLIER session in a new tab, also
+  <별칭> 폴더 켜줘, open a new claude session), optionally on the model and effort the user names and
+  with a first prompt that hands work over (<별칭>에 Opus xhigh로 세션 켜서 이거 넘겨줘, open a
+  session in X and hand this off). (2) RESUME an EARLIER session in a new tab, also
   one found by its title or content (아까 그 세션 다시 켜줘, <별칭> 폴더 이어서 켜줘, reopen my
   last session). (3) REBOOT-AND-CONTINUE: carry the CURRENT session, and the other open ones,
   across a Windows restart for work that needs one (Windows Update, drivers, WSL/Docker/Hyper-V,
@@ -33,10 +35,10 @@ object on stdout** — branch on `ok` and `code`; `message` is the explanation f
 are in English: relay them in the user's language. Any script can also return `INTERNAL_ERROR`
 (exit code 2): relay its `message` and do not retry blindly.
 
-§3, §5 and the last two sections keep their full steps in `references/` next to this file: read the
-one named there before running that branch's scripts. Their commands start with the CLAUDE_SKILL_DIR
-placeholder, which is not filled in there: put this skill's folder in its place, as in the commands
-here.
+§3, §5, the §1 hand-off and the last two sections keep their full steps in `references/` next to
+this file: read the one named there before running that branch's scripts. Their commands start with
+the CLAUDE_SKILL_DIR placeholder, which is not filled in there: put this skill's folder in its place,
+as in the commands here.
 
 The rules below apply to the user's words in whatever language they are spoken.
 
@@ -44,7 +46,7 @@ The rules below apply to the user's words in whatever language they are spoken.
 
 | The user wants to | Branch | Reversible? |
 |---|---|---|
-| **open** a new session (new scratch task, a registered alias, a path they gave) | §1 Launch | one tab — close it and it is gone |
+| **open** a new session (new scratch task, a registered alias, a path they gave), also on a named model or handing it work | §1 Launch | one tab — close it and it is gone |
 | **reopen** an earlier session | §2 Resume | appends to an existing conversation |
 | **restart the computer** and continue this session | §3 Reboot | **a restart cannot be undone** |
 | cancel or inspect a scheduled restart/resume | §4 Cancel / Status | read and clean-up only |
@@ -64,8 +66,8 @@ The rules below apply to the user's words in whatever language they are spoken.
 ## 1. Launch — open a new session
 
 **Gate 1 (when to fire).** Run only when the message carries an **explicit intent to launch** ("open",
-"turn on", "launch", "fire up", "start a new …") and its object is **Claude / a session** or **a
-workspace folder** ("open the … folder", "start a new scratch task"). A project, product or folder name that
+"turn on", "launch", "fire up", "start a new …") and its object is **Claude / a session** (a model
+name such as Opus counts) or **a workspace folder** ("open the … folder", "start a new scratch task"). A project, product or folder name that
 merely comes up in conversation ("I have a question about …") never fires this skill.
 
 **Gate 2 (what to open).** The alias table is not in this file — it holds personal paths, so it lives
@@ -101,6 +103,16 @@ When the user gives the new session a name ("open the blog folder and call it re
 title, the CLI's own `/resume` picker and `list-sessions.ps1` all show it. Never make a name up.
 `INVALID_NAME` — the name holds a character that cannot pass through the terminal safely (quotes,
 backslashes, `%`, `& | < > ^ !`); nothing was opened. Offer the name without them.
+
+**Model, effort and a first prompt** ("open X on Opus xhigh and hand this off"). Add `-Model` and
+`-Effort` only for what the user said, in the form they said it — the kit never picks either, just as
+it never picks a permission mode. A bare family name stays an alias ("opus" → `opus`); a name with a
+version becomes the full id only when you know it for certain ("Opus 5.5" → `claude-opus-5-5`),
+otherwise ask. `-Effort` is `low`, `medium`, `high`, `xhigh` or `max`. Before passing a first prompt
+(`-Prompt:'<text>'`), read `${CLAUDE_SKILL_DIR}/references/handoff.md`. **Never put a secret (token,
+password, webhook URL) in the prompt or in a hand-off note.** A hand-off ("세션 켜서 이거 넘겨줘",
+"위임해줘") still needs Gate 1's launch verb and is never approval for §3; these options exist only
+for a new session, not for §2.
 
 The session opens as a new tab in the existing Windows Terminal window (a plain console window when
 `wt` is absent). Its id and folder are recorded in the registry (`sessions.jsonl`), which is where §2
@@ -145,6 +157,7 @@ before the last trust write is kept in the state folder as `claude.json.before-t
 
 `ALIAS_NOT_FOUND` (`known` lists the registered names), `NO_ALIASES`, `PATH_NOT_FOUND` — do not guess
 a path; ask the user. `CLAUDE_NOT_FOUND` — the `claude` executable could not be located.
+`INVALID_MODEL`, `INVALID_EFFORT`, `INVALID_PROMPT`, `CLAUDE_IS_SHIM` — see `references/handoff.md`.
 
 ## 2. Resume — reopen an earlier session
 

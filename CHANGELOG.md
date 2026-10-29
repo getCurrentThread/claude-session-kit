@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Launch on a named model and effort, with a first prompt.** `open-workspace` and `new-temp-task`
+  take `-Model`, `-Effort` and `-Prompt`, so "open X on Opus xhigh and hand this off" is one call:
+  `claude --model … --effort … --session-id … -- <prompt>`. The kit never picks a model or an effort
+  itself. The prompt rides on Windows Terminal's command line, which — measured on Windows Terminal
+  1.24 with a real tab and an argv-recording child — keeps line breaks, `;`, Hangul, emoji and 8000
+  characters but changes a `"`, a defined `%NAME%`, a tab with no space and a trailing backslash
+  after a space. Those shapes (for `%`, any pair, since the kit cannot know which names the tab
+  defines), blank prompts and prompts over 8000 characters are refused (`INVALID_PROMPT`) before
+  anything is created, and the prompt is never printed or logged (`promptChars` only). Behind an
+  npm `.cmd` shim a prompt is refused (`CLAUDE_IS_SHIM`); a bad model word or effort level is
+  `INVALID_MODEL` / `INVALID_EFFORT`. Long instructions go in a hand-off note the prompt points at
+  (`references/handoff.md`). `resume-session` does not take these.
 - **`-TrustFolder`: open an untrusted folder with no trust prompt.** `open-workspace`,
   `new-temp-task`, `resume-session` and `restore-open` take it. The kit writes
   `projects[<trust key>].hasTrustDialogAccepted: true` into `~/.claude.json` — what answering the

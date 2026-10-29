@@ -127,6 +127,36 @@ try {
         (Same $refused.Count $bad.Count) -and (Same (Get-NameRefusal $bad[0]).code 'INVALID_NAME') -and
         ($null -eq (Get-NameRefusal "blog refactor (v2) - it's done; ok")) -and ($null -eq (Get-NameRefusal ([string]::new([char[]](0xBE14, 0xB85C, 0xADF8)))))
     }
+    Check 'argv: model and effort go after the name and before the session id; the prompt stays last, after --' {
+        Same (Get-ClaudeArgs -Mode new -SessionId '11111111-1111-1111-1111-111111111111' -Name 'blog refactor' -Model 'claude-opus-5-5' -Effort xhigh -Prompt 'read the note' -PermissionMode plan) @(
+            '--permission-mode', 'plan', '--name', 'blog refactor', '--model', 'claude-opus-5-5', '--effort', 'xhigh', '--session-id', '11111111-1111-1111-1111-111111111111', '--', 'read the note')
+    }
+    Check 'argv: a model is one plain word in any vendor form; an effort is a CLI level in lower case' {
+        $good = @('opus', 'claude-opus-5-5', 'claude-opus-5-5[1m]', 'us.anthropic.claude-opus-5-5-v1:0', 'claude-opus-5-5@20261001', 'arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc')
+        $bad = @('-p', 'opus 5.5', 'opus;x', '"opus"', '%MODEL%', "opus`n")
+        $refused = @($bad | Where-Object { $r = Get-ModelRefusal $_; $r -and $r.code -eq 'INVALID_MODEL' -and (Throws { Get-ClaudeArgs -Mode new -Model $_ }) })
+        (Same @($good | Where-Object { Get-ModelRefusal $_ }) @()) -and (Same $refused.Count $bad.Count) -and
+        (Same @('low', 'medium', 'high', 'xhigh', 'max' | Where-Object { Get-EffortRefusal $_ }) @()) -and (Same (Get-EffortRefusal 'XHIGH').code 'INVALID_EFFORT') -and
+        (Throws { Get-ClaudeArgs -Mode new -Effort 'XHIGH' }) -and (Throws { Get-ClaudeArgs -Mode new -Effort 'ultra' })
+    }
+    # Each shape was sent once through a real Windows Terminal tab to an argv-recording exe
+    # (see Get-PromptRefusal): what arrived changed must be refused, as must a blank or
+    # over-long prompt; what arrived intact must pass. Two shapes arrived intact and are
+    # refused anyway, because the rule is coarser than wt: a %...% pair is a variable once
+    # the tab defines that name, and a trailing backslash breaks once there is a space.
+    $changedByWt = @('say "hi" now', '"run the check" please', 'a"b', 'x\" y', 'look at %PATH% here', '%USERPROFILE%', "a`tb", 'open C:\some dir\',
+        '   ', "`r`n", ('x' * 8001), '50% done and 30% left', 'C:\dir\')
+    $intactThroughWt = @("line one`nline two", "line one`r`nline two", "a`nb", 'first; second', 'stop here;', 'a\;b c', 'C:\dir\x', 'only 50% done',
+        '-x starts with a dash', ('한글 위임 ' + [char]::ConvertFromUtf32(0x1F680) + ' done'), 'R&D | a<b> ^c !d', 'cost $5 and `n and $env:PATH', "it's fine",
+        'C:\Users\someone\.claude\handoffs\task-2026-10-29.md 위임 문서를 끝까지 읽고, 지시대로 진행해줘.', (('abcdefg ' * 999) + '한글'))
+    Check 'prompt: every shape a real wt tab changed is refused, every shape it kept passes; a refusal never echoes the prompt' {
+        $refused = @($changedByWt | Where-Object { $r = Get-PromptRefusal $_; $r -and $r.code -eq 'INVALID_PROMPT' -and (Throws { Get-ClaudeArgs -Mode new -Prompt $_ }) })
+        $passed = @($intactThroughWt | Where-Object { -not (Get-PromptRefusal $_) -and ((Get-ClaudeArgs -Mode new -Prompt $_)[-1] -ceq $_) })
+        $json = Get-PromptRefusal 'SECRET-MARKER "x"' | ConvertTo-Json -Compress
+        $thrown = try { Get-ClaudeArgs -Mode new -Prompt 'SECRET-MARKER "x"' } catch { $_.Exception.Message }
+        (Same $refused.Count $changedByWt.Count) -and (Same $passed.Count $intactThroughWt.Count) -and ($json -notmatch 'SECRET') -and
+        ($thrown -notmatch 'SECRET') -and ($thrown -match 'double quote') -and (Same (Get-PromptRefusal ('x' * 8001)).promptChars 8001)
+    }
     Check 'session id: a trailing line feed is not part of a UUID' {
         (Test-SessionIdFormat '11111111-1111-1111-1111-111111111111') -and -not (Test-SessionIdFormat "11111111-1111-1111-1111-111111111111`n") -and
         (Throws { Get-ClaudeArgs -Mode resume -SessionId "11111111-1111-1111-1111-111111111111`n" })
@@ -399,6 +429,18 @@ $bg = Invoke-SessionLaunch -WorkDir $Dir -Mode resume -SessionId $Id -RunningSes
     Check 'new-temp-task: a refused name creates no folder either' {
         $r = Invoke-Script 'new-temp-task.ps1' @('-Name', 'R&D', '-TrustFolder')
         (Same $r.Json.code 'INVALID_NAME') -and -not (Get-ChildItem -LiteralPath $declined -Directory)
+    }
+    Check 'new-temp-task: a refused model, effort or prompt creates no folder, and the prompt is never printed' {
+        $m = Invoke-Script 'new-temp-task.ps1' @('-Model', 'opus 5.5', '-TrustFolder')
+        $e = Invoke-Script 'new-temp-task.ps1' @('-Effort', 'XHIGH', '-TrustFolder')
+        $p = Invoke-Script 'new-temp-task.ps1' @('-Prompt:SECRET-MARKER say "hi"', '-TrustFolder')
+        (Same $m.Json.code 'INVALID_MODEL') -and (Same $e.Json.code 'INVALID_EFFORT') -and (Same $p.Json.code 'INVALID_PROMPT') -and (Same $p.ExitCode 1) -and
+        ($p.Text -notmatch 'SECRET') -and -not (Get-ChildItem -LiteralPath $declined -Directory)
+    }
+    Check 'open-workspace: -Prompt:"-x ..." binds as text and still stops at an untrusted folder; a refused prompt says only its length' {
+        $r = Invoke-Script 'open-workspace.ps1' @('-Alias', 'nope', '-Model', 'haiku', '-Effort', 'low', '-Prompt:-x starts with a dash')
+        $bad = Invoke-Script 'open-workspace.ps1' @('-Alias', 'nope', '-Prompt:look at %PATH%')
+        (Same $r.Json.code 'UNTRUSTED_WORKSPACE') -and (Same $bad.Json.code 'INVALID_PROMPT') -and (Same $bad.Json.promptChars 14) -and ($bad.Text -notmatch 'look at')
     }
     Check 'new-temp-task: untrusted root creates no folder' {
         $r = Invoke-Script 'new-temp-task.ps1'
@@ -816,6 +858,39 @@ $r = Invoke-SessionLaunch -WorkDir $Dir -Mode new -Source open -Name 'blog refac
         (Same @($o.argv[0..1]) @('--name', 'blog refactor')) -and (Same $reg.Count 1) -and (Same $reg[0].Name 'blog refactor') -and
         (Same $row.title 'blog refactor') -and (Same $row.titleSource 'custom') -and (Same $wired.Count 2) -and
         (Same $renamed.title 'renamed') -and (Same $renamed.titleSource 'custom')
+    }
+    Check 'launch: the hand-off case (model, effort, first prompt) gives the exact argv; the prompt is in no result, record or log; a .cmd shim refuses only a prompt' {
+        $probe = Join-Path $sandbox 'handoffprobe.ps1'
+        [IO.File]::WriteAllText($probe, @'
+param($Lib, $Dir, $Claude, $Prompt, $Model, $Effort)
+. $Lib
+function Resolve-ClaudeBinary { $Claude }
+function Start-ClaudeTerminal { param($WorkDir, $ClaudeExe, $ClaudeArgs) $script:argv = $ClaudeArgs; 'stub' }
+$script:argv = $null
+$r = Invoke-SessionLaunch -WorkDir $Dir -Mode new -Source open -Model $Model -Effort $Effort -Prompt $Prompt
+@{ result = $r; argv = $script:argv } | ConvertTo-Json -Compress -Depth 4
+'@)
+        $lib = Join-Path $scripts 'lib\Core.Effects.ps1'
+        $note = 'Read the handoff note to the end; SECRET-MARKER-7, then show a plan first.'
+        function Launch($Claude, $Prompt, $Model, $Effort) {
+            $out = & pwsh -NoProfile -ExecutionPolicy Bypass -File $probe -Lib $lib -Dir $titled -Claude $Claude -Prompt $Prompt -Model $Model -Effort $Effort 2>&1 | Select-Object -Last 1
+            return [pscustomobject]@{ Text = "$out"; Json = ("$out" | ConvertFrom-Json) }
+        }
+        $a = Launch 'C:\bin\claude.exe' $note 'claude-opus-5-5' 'xhigh'
+        $shim = Launch 'C:\npm\claude.cmd' $note 'claude-opus-5-5' 'xhigh'
+        $modelOnly = Launch 'C:\npm\claude.cmd' '' 'haiku' ''
+        $refused = Launch 'C:\bin\claude.exe' 'SECRET-MARKER-7 "quoted"' 'haiku' 'low'
+        $id = $a.Json.result.sessionId
+        $reg = @(Get-RegisteredSessions | Where-Object SessionId -eq $id)
+        $log = @(Get-Content -LiteralPath (Get-KitPath log) | Where-Object { $_ -match [regex]::Escape($id) })
+        $wired = @('open-workspace.ps1', 'new-temp-task.ps1' | Where-Object { (Get-Content (Join-Path $scripts $_) -Raw) -match 'Invoke-SessionLaunch[^\r\n]*-Name \$Name -Model \$Model -Effort \$Effort -Prompt \$Prompt' })
+        (Same $a.Json.argv @('--model', 'claude-opus-5-5', '--effort', 'xhigh', '--session-id', $id, '--', $note)) -and (Same $a.Json.result.code 'LAUNCHED') -and
+        (Same $a.Json.result.model 'claude-opus-5-5') -and (Same $a.Json.result.effort 'xhigh') -and (Same $a.Json.result.promptChars $note.Length) -and
+        (Same $reg.Count 1) -and (Same $log.Count 1) -and ($log[0] -match "model=claude-opus-5-5 effort=xhigh promptChars=$($note.Length) ") -and
+        (($a.Json.result | ConvertTo-Json -Compress) -notmatch 'SECRET') -and -not (Select-String -LiteralPath (Get-KitPath registry), (Get-KitPath log) -Pattern 'SECRET' -SimpleMatch -CaseSensitive) -and
+        (Same $shim.Json.result.code 'CLAUDE_IS_SHIM') -and ($null -eq $shim.Json.argv) -and
+        (Same $modelOnly.Json.result.code 'LAUNCHED') -and (Same $modelOnly.Json.argv @('--model', 'haiku', '--session-id', $modelOnly.Json.result.sessionId)) -and
+        (Same $refused.Json.result.code 'INVALID_PROMPT') -and ($null -eq $refused.Json.argv) -and ($refused.Text -notmatch 'SECRET') -and (Same $wired.Count 2)
     }
     Check 'registry: a row written before names existed still loads' {
         $legacy = [guid]::NewGuid().ToString()
@@ -1427,6 +1502,36 @@ public static class W {
                 if ($a.Count -ne 4 -or $a[3] -cne $t) { throw "prompt #$([array]::IndexOf($tricky, $t) + 1) arrived as $($a.Count) argument(s)" }
             }
             $true
+        }
+        # The first hop of a launch, pwsh -> wt, with the recording exe standing in for wt. The
+        # second hop happens inside the real wt, where no stand-in can see it; it was measured
+        # by hand (see Get-PromptRefusal), and $intactThroughWt holds what survived it.
+        Check 'launch: every prompt that passes reaches wt as the exact argument list, in Legacy argument mode (7.0-7.2) too' {
+            $probe = Join-Path $sandbox 'wtprobe.ps1'
+            [IO.File]::WriteAllText($probe, @'
+param($Lib, $Wt, $PromptList, [switch]$Legacy)
+. $Lib
+Set-Location -LiteralPath $PSScriptRoot
+if ($Legacy) { $PSNativeCommandArgumentPassing = 'Legacy' }
+function Resolve-WindowsTerminal { $Wt }
+function Show-TerminalWindow {}
+$i = 0
+foreach ($line in Get-Content -LiteralPath $PromptList) {
+    $i++
+    $p = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($line))
+    $claudeArgs = Get-ClaudeArgs -Mode new -SessionId '11111111-1111-1111-1111-111111111111' -Model 'claude-opus-5-5[1m]' -Effort xhigh -Prompt $p
+    Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'C:\bin\claude.exe' -ClaudeArgs $claudeArgs | Out-Null
+    $seen = @(Get-Content -LiteralPath (Join-Path (Split-Path $Wt) 'argv.txt') | Where-Object { $_ } | ForEach-Object { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($_)) })
+    $want = New-WtArgumentList -WorkDir $PSScriptRoot -Exe 'C:\bin\claude.exe' -Arguments $claudeArgs -Window '0'
+    if ((ConvertTo-Json $seen -Compress) -cne (ConvertTo-Json $want -Compress)) { "prompt #$i" }
+}
+'@)
+            $list = Join-Path $sandbox 'wt-prompts.txt'
+            [IO.File]::WriteAllLines($list, @($intactThroughWt | ForEach-Object { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($_)) }))
+            $lib = Join-Path $scripts 'lib\Core.Effects.ps1'
+            $modern = @(& pwsh -NoProfile -ExecutionPolicy Bypass -File $probe -Lib $lib -Wt $echoExe -PromptList $list 2>&1 | ForEach-Object { "$_" })
+            $legacy = @(& pwsh -NoProfile -ExecutionPolicy Bypass -File $probe -Lib $lib -Wt $echoExe -PromptList $list -Legacy 2>&1 | ForEach-Object { "$_" })
+            (Same $modern @()) -and (Same $legacy @())
         }
     } else {
         Skip 'resume: argv round trip through a real .exe' 'could not build the argv-echo helper (needs Windows PowerShell 5.1)'

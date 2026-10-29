@@ -62,6 +62,10 @@ function Invoke-SessionLaunch {
         [string]$Alias,
         [ValidateSet('new', 'open', 'resume')][string]$Source = 'open',
         [string]$Name,
+        # model, effort and first prompt: only what the person asked for, as they said it
+        [string]$Model,
+        [string]$Effort,
+        [string]$Prompt,
         [string]$PermissionMode,
         [switch]$Fork,
         # Marks the folder trusted in ~/.claude.json first, so no prompt appears. Only on the person's say-so.
@@ -70,8 +74,9 @@ function Invoke-SessionLaunch {
         [object[]]$RunningSessions
     )
 
-    $refusal = Get-NameRefusal $Name
-    if ($refusal) { return $refusal }
+    foreach ($refusal in (Get-NameRefusal $Name), (Get-ModelRefusal $Model), (Get-EffortRefusal $Effort), (Get-PromptRefusal $Prompt)) {
+        if ($refusal) { return $refusal }
+    }
 
     $trusted = Test-WorkspaceTrusted -Path $WorkDir
     if (-not $trusted -and -not $TrustFolder) {
@@ -81,6 +86,12 @@ function Invoke-SessionLaunch {
     $claude = Resolve-ClaudeBinary
     if (-not $claude) {
         return [ordered]@{ ok = $false; code = 'CLAUDE_NOT_FOUND'; message = 'The claude executable was not found on PATH or in the usual install locations.' }
+    }
+    if ($Prompt -and (Test-ClaudeShim $claude)) {
+        return [ordered]@{
+            ok = $false; code = 'CLAUDE_IS_SHIM'; claude = $claude
+            message = 'claude is a .cmd/.bat shim here (an npm install), and cmd.exe would re-read a prompt on its command line. Nothing was opened. Open the session without -Prompt and type the prompt in the tab, or install the native claude.exe.'
+        }
     }
 
     # Two tabs on one conversation interleave their writes into the same transcript.
@@ -110,7 +121,7 @@ function Invoke-SessionLaunch {
     $forkedFrom = $null
     $forkId = $null
     if ($Fork -and $Mode -eq 'resume') { $forkedFrom = $SessionId; $forkId = [guid]::NewGuid().ToString() }
-    $claudeArgs = Get-ClaudeArgs -Mode $Mode -SessionId $SessionId -Name $Name -PermissionMode $PermissionMode -Fork:$Fork -ForkSessionId $forkId
+    $claudeArgs = Get-ClaudeArgs -Mode $Mode -SessionId $SessionId -Name $Name -Model $Model -Effort $Effort -Prompt $Prompt -PermissionMode $PermissionMode -Fork:$Fork -ForkSessionId $forkId
     if ($forkId) { $SessionId = $forkId }
 
     # Written only after every refusal above, so a refused launch never leaves trust behind.
@@ -128,7 +139,8 @@ function Invoke-SessionLaunch {
     if ($SessionId -and $Mode -ne 'picker') {
         try { Register-LaunchedSession -SessionId $SessionId -Cwd $WorkDir -Alias $Alias -Source $Source -Name $Name; $registered = $true } catch {}
     }
-    Write-KitLog ("launch mode={0} source={1} launcher={2} session={3} forkedFrom={4} cwd={5}" -f $Mode, $Source, $launcher, $SessionId, $forkedFrom, $WorkDir)
+    # the prompt's length only, never its text
+    Write-KitLog ("launch mode={0} source={1} launcher={2} session={3} forkedFrom={4} model={5} effort={6} promptChars={7} cwd={8}" -f $Mode, $Source, $launcher, $SessionId, $forkedFrom, $Model, $Effort, $Prompt.Length, $WorkDir)
 
     $code = switch ($Mode) { 'new' { 'LAUNCHED' } 'resume' { 'RESUMED' } 'picker' { 'PICKER_OPENED' } }
     $message = switch ($Mode) {
@@ -144,5 +156,8 @@ function Invoke-SessionLaunch {
     }
     if ($trustWritten) { $result['trustWritten'] = $true; $result['trustKey'] = Get-TrustKey -Path $WorkDir }
     if ($forkedFrom) { $result['forkedFrom'] = $forkedFrom }
+    if ($Model) { $result['model'] = $Model }
+    if ($Effort) { $result['effort'] = $Effort }
+    if ($Prompt) { $result['promptChars'] = $Prompt.Length }
     return $result
 }

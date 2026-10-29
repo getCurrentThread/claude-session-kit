@@ -11,11 +11,22 @@
   folder that was deleted still owns its project history under ~/.claude/projects,
   and reusing its number would drop the new session into that old history.
 
-  Prints one JSON object. code: LAUNCHED | UNTRUSTED_WORKSPACE | TRUST_WRITE_FAILED | PATH_NOT_FOUND | CLAUDE_NOT_FOUND | INVALID_NAME
+  Prints one JSON object. code: LAUNCHED | UNTRUSTED_WORKSPACE | TRUST_WRITE_FAILED | PATH_NOT_FOUND | CLAUDE_NOT_FOUND |
+  CLAUDE_IS_SHIM | INVALID_NAME | INVALID_MODEL | INVALID_EFFORT | INVALID_PROMPT
 
 .PARAMETER Name
   A display name for the session (`claude --name`): the tab title, the CLI's /resume
   picker and list-sessions.ps1 all show it. Only when the user named the session.
+
+.PARAMETER Model
+  `claude --model`, exactly as the user named it (an alias such as opus, or a full id).
+
+.PARAMETER Effort
+  `claude --effort`: low, medium, high, xhigh or max. Only when the user said one.
+
+.PARAMETER Prompt
+  The new session's first message. Pass it as -Prompt:'...' so a leading - stays text.
+  Never printed or logged; the result carries promptChars only.
 
 .PARAMETER TrustFolder
   Marks the NEW folder (not the root) trusted in ~/.claude.json before opening, so no
@@ -24,6 +35,9 @@
 [CmdletBinding()]
 param(
     [string]$Name,
+    [string]$Model,
+    [string]$Effort,
+    [string]$Prompt,
     [switch]$TrustFolder
 )
 
@@ -45,8 +59,10 @@ try {
         Exit-WithResult (New-UntrustedRefusal -Path $root -Message 'The scratch root is not trusted in Claude Code. No folder was created and no session was started.')
     }
 
-    $refusal = Get-NameRefusal $Name   # before the folder exists, for the same reason
-    if ($refusal) { Exit-WithResult $refusal }
+    # before the folder exists, for the same reason
+    foreach ($refusal in (Get-NameRefusal $Name), (Get-ModelRefusal $Model), (Get-EffortRefusal $Effort), (Get-PromptRefusal $Prompt)) {
+        if ($refusal) { Exit-WithResult $refusal }
+    }
 
     $disk = @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue | ForEach-Object Name)
     $history = @(Get-ChildItem -LiteralPath (Get-ClaudeProjectsDir) -Directory -ErrorAction SilentlyContinue | ForEach-Object Name)
@@ -64,7 +80,7 @@ try {
     }
     if (-not $newDir) { throw "Could not create a scratch folder under $root." }
 
-    $result = Invoke-SessionLaunch -WorkDir $newDir -Mode new -Source new -Name $Name -TrustFolder:$TrustFolder
+    $result = Invoke-SessionLaunch -WorkDir $newDir -Mode new -Source new -Name $Name -Model $Model -Effort $Effort -Prompt $Prompt -TrustFolder:$TrustFolder
     # Nothing was opened, so the folder made for it goes too (Delete refuses a folder that is not empty).
     if (-not $result['ok']) { try { [IO.Directory]::Delete($newDir) } catch {} }
     Exit-WithResult $result
