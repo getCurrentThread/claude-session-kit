@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — hand work to a new session, trust a folder on request
 
 - **Launch on a named model and effort, with a first prompt.** `open-workspace` and `new-temp-task`
   take `-Model`, `-Effort` and `-Prompt`, so "open X on Opus xhigh and hand this off" is one call:

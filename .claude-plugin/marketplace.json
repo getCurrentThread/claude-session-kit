@@ -5,7 +5,7 @@
   },
   "metadata": {
     "description": "Windows session tools for Claude Code: launch, resume, reboot-and-continue, and restore after a crash.",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "pluginRoot": "."
   },
   "plugins": [
@@ -13,7 +13,7 @@
       "name": "claude-session-kit",
       "source": "./",
       "description": "Open a new Claude Code session in a workspace folder, find and reopen an earlier one, carry sessions across a Windows reboot, and bring them back after a crash.",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "keywords": ["windows", "powershell", "windows-terminal", "session", "resume", "reboot", "restore", "hooks"]
     }
   ]
