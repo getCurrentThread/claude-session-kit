@@ -1,14 +1,16 @@
 # claude-session-kit
 
+English · [Korean](README-ko.md)
+
 A [Claude Code](https://claude.com/claude-code) plugin for **Windows** with one skill that runs the
 whole life of a session — start, find, reopen, carry across a reboot, bring back after a crash:
 
 | | You say | What happens |
 |---|---|---|
-| **Launch** | "open a new claude session", "새 임시 작업 켜줘", "`<alias>` 폴더 켜줘", "`<alias>`에 Opus xhigh로 켜서 이거 넘겨줘" | A new Windows Terminal tab opens in a fresh scratch folder or a registered workspace, running `claude` (optionally under a name, on the model and effort you name, with a first prompt that hands it the work). |
-| **Resume** | "reopen my last session", "아까 그 세션 다시 켜줘", "배포 얘기하던 세션 찾아서 켜줘" | An earlier session — picked from the list, by title, or found by what was said in it — is reopened in a new tab, in the folder it was recorded in. A session that is already open is never opened twice. |
-| **Reboot and continue** | "reboot and continue", "재부팅하고 이어서 해" | State is saved, a one-shot resume is registered, Windows restarts, and after you log in the **same session continues, already told what to do next** — and the other sessions that were open come back in their own tabs. |
-| **Restore** | "reopen the sessions I had open", "아까 열려 있던 세션들 다시 켜줘" | After a crash, a closed window or an unplanned restart, the sessions that were open are listed and reopened, each in its own folder with the permission mode it was started with. |
+| **Launch** | "open a new claude session", "start a new scratch task", "open the `<alias>` folder", "open a session in `<alias>` on Opus xhigh and hand this off" | A new Windows Terminal tab opens in a fresh scratch folder or a registered workspace, running `claude` (optionally under a name, on the model and effort you name, with a first prompt that hands it the work). |
+| **Resume** | "reopen my last session", "find the session where we talked about the deploy and reopen it" | An earlier session — picked from the list, by title, or found by what was said in it — is reopened in a new tab, in the folder it was recorded in. A session that is already open is never opened twice. |
+| **Reboot and continue** | "reboot and continue", "restart the computer and pick up where we left off" | State is saved, a one-shot resume is registered, Windows restarts, and after you log in the **same session continues, already told what to do next** — and the other sessions that were open come back in their own tabs. |
+| **Restore** | "reopen the sessions I had open", "recover the sessions from before the crash" | After a crash, a closed window or an unplanned restart, the sessions that were open are listed and reopened, each in its own folder with the permission mode it was started with. |
 
 This repository used to be `reboot-continue`. It was renamed when the launcher was merged in; see
 [CHANGELOG.md](CHANGELOG.md) if you are coming from that skill.
@@ -65,7 +67,7 @@ Workspace aliases are personal, so they live outside the plugin, in
   "aliases": {
     "blog": {
       "path": "C:\\work\\blog",
-      "triggers": ["blog folder", "블로그 폴더"],
+      "triggers": ["blog folder", "my blog"],
       "note": "A bare mention of 'blog' usually means the live site, not this folder: ask before opening."
     }
   }
@@ -105,6 +107,10 @@ signs, since the kit cannot know which names the tab defines — as are blank pr
 8000 characters, before anything is created. The prompt is never printed or logged
 (`promptChars` only). Behind an npm `.cmd` shim a prompt is refused (`CLAUDE_IS_SHIM`); a model or an
 effort alone is fine. Keep secrets out of the prompt: a command line shows in the process list.
+
+A hand-off names both ends, so the two sessions can reach each other with Claude Code's own
+SendMessage: the new session is always started with `-Name` (the result's `name` is its address in
+ListAgents), and the prompt tells it the asking session's name to report back to.
 
 **Resume.** `resume-session.ps1` picks a session in this order: the **launcher registry** → a **scan of
 interactive transcripts from the last 30 days** → the **CLI's own picker** (`claude --resume`) in that
@@ -302,39 +308,6 @@ Remove-Item -Recurse -Force "$env:USERPROFILE\.claude\claude-session-kit"    # a
 
 The hooks go with the plugin. The last line also deletes `archive\` — the only copy of any transcript
 Claude Code has since cleaned up — so move it somewhere first if you want to keep it.
-
----
-
-## 한국어 요약
-
-Windows용 Claude Code 플러그인입니다. 스킬 하나(`claude-session-kit:session`)가 세션의 실행 → 찾기 →
-재개 → 재부팅 연속 → 크래시 복구를 맡습니다.
-
-- **새 세션 열기** — "새 임시 작업 켜줘", "`<별칭>` 폴더 켜줘". Windows Terminal 새 탭에서 `claude`를
-  띄웁니다. `-Name`으로 이름을 붙이면 CLI 피커에도 같은 이름이 보입니다. "Opus xhigh로 켜서 이거
-  넘겨줘"처럼 말하면 `-Model`·`-Effort`·`-Prompt`로 그 모델·effort로 켜고 첫 프롬프트로 일을 넘깁니다
-  (모델·effort는 말한 것만 씁니다). 긴 지시는 handoff 노트에 쓰고 프롬프트는 그 노트를 가리킵니다.
-  프롬프트는 wt 명령줄을 타므로 `"`, `%이름%`, 탭, 끝 `\`는 거절하고, 본문은 출력·로그에 남기지 않습니다.
-- **이전 세션 다시 열기** — "아까 그 세션 다시 켜줘". 런처 레지스트리 → 최근 30일 transcript 스캔 →
-  CLI 기본 피커 순으로 고릅니다. 제목(`/rename` > 자동 제목 > 첫 입력)과 내용 검색
-  (`search-sessions.ps1`)으로도 찾습니다. 이미 열려 있는 세션은 두 번 열지 않고(`ALREADY_RUNNING`),
-  시작할 때의 권한 모드를 그대로 쓰되 `bypassPermissions`는 절대 되살리지 않습니다. 크론·SDK 세션은
-  후보가 아니고 `--continue`는 쓰지 않습니다.
-- **재부팅하고 이어서** — "재부팅하고 이어서 해". 계획(`reboot-plan`)과 실행(`reboot-commit`)이 분리돼
-  있고, 재부팅할 수 있는 파일은 `reboot-commit.ps1` 하나뿐입니다. 로그인하면 같은 세션이 이어지고,
-  함께 열려 있던 다른 세션(최대 8개)도 프롬프트 없이 각자 탭으로 돌아옵니다. 대기 중인 재개를
-  덮어쓰거나(`RESUME_PENDING`) 30분 넘은 메모를 다시 쓰는 것(`PROMPT_STALE`)은 거부합니다.
-- **크래시 후 복구** — "아까 열려 있던 세션들 다시 켜줘". 플러그인 훅(SessionStart/SessionEnd)이 열린
-  대화형 세션을 기록하고 일부러 끝낸 세션만 지웁니다. 창 닫힘·크래시·정전으로 남은 세션을
-  `restore-open.ps1`이 보여 주고 다시 엽니다.
-- **보관 기간** — Claude Code는 `cleanupPeriodDays`(기본 30일)가 지난 transcript를 지웁니다. 30일 이하면
-  경고하고(설정은 읽기만 합니다, 0은 금지), `archive-sessions.ps1`로 사본을 남길 수 있습니다.
-
-별칭은 플러그인 밖 `%USERPROFILE%\.claude\claude-session-kit\aliases.json`에 둡니다. 신뢰되지 않은
-폴더에서는 세션을 **켜지 않고 알려줍니다**(fail-closed). "신뢰하고 열어줘"라고 하면(`-TrustFolder`) 킷이
-`~/.claude.json`에 그 폴더의 신뢰를 직접 기록하고 신뢰 질문 없이 엽니다. Claude Code와 같은 잠금을 쓰고,
-홈 폴더·드라이브 루트는 거부합니다.
-비밀번호를 저장하지 않는 반자동 설계라 로그인은 직접 합니다.
 
 ## License
 

@@ -156,6 +156,8 @@ function Invoke-SessionLaunch {
     }
     if ($trustWritten) { $result['trustWritten'] = $true; $result['trustKey'] = Get-TrustKey -Path $WorkDir }
     if ($forkedFrom) { $result['forkedFrom'] = $forkedFrom }
+    # the name is also the session's SendMessage address in ListAgents
+    if ($Name) { $result['name'] = $Name }
     if ($Model) { $result['model'] = $Model }
     if ($Effort) { $result['effort'] = $Effort }
     if ($Prompt) { $result['promptChars'] = $Prompt.Length }

@@ -832,14 +832,14 @@ $splat = $ArgsJson | ConvertFrom-Json -AsHashtable
         (Same $bytes[$at - 1] ([byte]10)) -and (Same ([Text.Encoding]::UTF8.GetString($bytes, $at, $title.Length)) $title) -and
         (Same $rec.Title 'on the boundary') -and (Same $rec.TitleSource 'custom')
     }
-    Check '-Name: reaches the claude argv and the registry; list-sessions shows it until the transcript records a title' {
+    Check '-Name: reaches the claude argv, the result and the registry; list-sessions shows it until the transcript records a title' {
         $probe = Join-Path $sandbox 'nameprobe.ps1'
         [IO.File]::WriteAllText($probe, @'
 param($Lib, $Dir)
 . $Lib
 function Start-ClaudeTerminal { param($WorkDir, $ClaudeExe, $ClaudeArgs) $script:argv = $ClaudeArgs; 'stub' }
 $r = Invoke-SessionLaunch -WorkDir $Dir -Mode new -Source open -Name 'blog refactor'
-@{ sessionId = $r.sessionId; argv = $script:argv } | ConvertTo-Json -Compress
+@{ sessionId = $r.sessionId; name = $r.name; argv = $script:argv } | ConvertTo-Json -Compress
 '@)
         try {
             $env:CLAUDE_CODE_BIN = $agentsOk
@@ -855,7 +855,7 @@ $r = Invoke-SessionLaunch -WorkDir $Dir -Mode new -Source open -Name 'blog refac
         New-Chat -Cwd $titled -Records @((Say '<command-name>/clear</command-name>'), (Titled custom 'renamed')) -Id $o.sessionId | Out-Null
         $renamed = @((Invoke-Script 'list-sessions.ps1' @('-Path', $titled)).Json.sessions | Where-Object sessionId -eq $o.sessionId)[0]
         New-Chat -Cwd $titled -Records @((Say '<command-name>/clear</command-name>')) -Id $o.sessionId | Out-Null
-        (Same @($o.argv[0..1]) @('--name', 'blog refactor')) -and (Same $reg.Count 1) -and (Same $reg[0].Name 'blog refactor') -and
+        (Same @($o.argv[0..1]) @('--name', 'blog refactor')) -and (Same $o.name 'blog refactor') -and (Same $reg.Count 1) -and (Same $reg[0].Name 'blog refactor') -and
         (Same $row.title 'blog refactor') -and (Same $row.titleSource 'custom') -and (Same $wired.Count 2) -and
         (Same $renamed.title 'renamed') -and (Same $renamed.titleSource 'custom')
     }

@@ -3,18 +3,19 @@ name: session
 description: >-
   Windows session tools for Claude Code, four jobs in one skill. (1) LAUNCH a NEW session in a
   Windows Terminal tab (a fresh scratch folder or a registered workspace alias) only on an
-  explicit launch verb with "Claude"/"session" or a workspace (클로드 켜줘, 새 임시 작업 켜줘,
-  <별칭> 폴더 켜줘, open a new claude session), optionally on the model and effort the user names and
-  with a first prompt that hands work over (<별칭>에 Opus xhigh로 세션 켜서 이거 넘겨줘, open a
-  session in X and hand this off). (2) RESUME an EARLIER session in a new tab, also
-  one found by its title or content (아까 그 세션 다시 켜줘, <별칭> 폴더 이어서 켜줘, reopen my
-  last session). (3) REBOOT-AND-CONTINUE: carry the CURRENT session, and the other open ones,
-  across a Windows restart for work that needs one (Windows Update, drivers, WSL/Docker/Hyper-V,
-  registry edits) when the user asks to reboot and continue (재부팅하고 이어서 해); cancelling or
-  checking it (재부팅 취소, 재개 예약 확인) too. (4) RESTORE the sessions that were open before a
-  crash or a closed window (아까 열려 있던 세션들 다시 켜줘, 크래시 전 세션 복구). Also backs up
-  transcripts before cleanup (세션 백업해줘). Never fire on a bare project or folder name
-  without a launch verb; "restart the session" is never a computer restart.
+  explicit launch verb with "Claude"/"session" or a workspace (open a new claude session, start a
+  new scratch task, open the <alias> folder), optionally on the model and effort the user names and
+  with a first prompt that hands work over (open a session in <alias> on Opus xhigh and hand this
+  off). (2) RESUME an EARLIER session in a new tab, also one found by its title or content (reopen
+  my last session, continue in the <alias> folder). (3) REBOOT-AND-CONTINUE: carry the CURRENT
+  session, and the other open ones, across a Windows restart for work that needs one (Windows
+  Update, drivers, WSL/Docker/Hyper-V, registry edits) when the user asks to reboot and continue;
+  cancelling or checking it (cancel the reboot, check the scheduled resume) too. (4) RESTORE the
+  sessions that were open before a crash or a closed window (reopen the sessions I had open,
+  recover the sessions from before the crash). Also backs up transcripts before cleanup (back up
+  my sessions). The examples are English; the same request in any language counts. Never fire on
+  a bare project or folder name without a launch verb; "restart the session" is never a computer
+  restart.
 ---
 
 # session — launch a session · reopen an earlier one · reboot and continue · restore after a crash
@@ -100,7 +101,9 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/open-
 
 When the user gives the new session a name ("open the blog folder and call it refactor"), add
 `-Name "<name>"` to either script. It becomes the session's display name (`claude --name`): the tab
-title, the CLI's own `/resume` picker and `list-sessions.ps1` all show it. Never make a name up.
+title, the CLI's own `/resume` picker and `list-sessions.ps1` all show it, and it is the session's
+SendMessage address. Never make a name up — except for a hand-off (`-Prompt`), which is always named
+so the two sessions can message each other (`references/handoff.md`).
 `INVALID_NAME` — the name holds a character that cannot pass through the terminal safely (quotes,
 backslashes, `%`, `& | < > ^ !`); nothing was opened. Offer the name without them.
 
@@ -110,8 +113,8 @@ it never picks a permission mode. A bare family name stays an alias ("opus" → 
 version becomes the full id only when you know it for certain ("Opus 5.5" → `claude-opus-5-5`),
 otherwise ask. `-Effort` is `low`, `medium`, `high`, `xhigh` or `max`. Before passing a first prompt
 (`-Prompt:'<text>'`), read `${CLAUDE_SKILL_DIR}/references/handoff.md`. **Never put a secret (token,
-password, webhook URL) in the prompt or in a hand-off note.** A hand-off ("세션 켜서 이거 넘겨줘",
-"위임해줘") still needs Gate 1's launch verb and is never approval for §3; these options exist only
+password, webhook URL) in the prompt or in a hand-off note.** A hand-off ("open a session and hand
+this over", "delegate this") still needs Gate 1's launch verb and is never approval for §3; these options exist only
 for a new session, not for §2.
 
 The session opens as a new tab in the existing Windows Terminal window (a plain console window when
@@ -142,7 +145,7 @@ with the same meaning. When you get it:
    `-TrustFolder` on a subfolder trusts the whole repository.
 
 `-TrustFolder` is used **only when the user's latest message says so** — a yes to that offer, "trust
-it and open", "신뢰하고 열어", "질문 없이 열어". A request to open a folder
+it and open", "open it without the trust question". A request to open a folder
 is not a request to trust it, and approval for one folder does not extend to another. Never write
 `~/.claude.json` any other way. `reboot-plan.ps1` has no `-TrustFolder`: there, offer to open the
 folder with `-TrustFolder` first.
@@ -230,7 +233,7 @@ Safety rules:
 - **Never run `claude --continue`**, not even as a fallback when a script fails — it reopens whatever
   is newest in the folder, which can append to an automation's conversation.
 - `-Fork` (resume into a copy, leaving the original untouched) only when the user said to copy it or
-  not to touch the original ("그 세션에서 갈라서 새로 해줘"). The copy gets a new `sessionId`, and
+  not to touch the original ("branch off that session and start fresh"). The copy gets a new `sessionId`, and
   `forkedFrom` names the original. A fork made in the CLI's picker (`PICKER_OPENED`) has no id the
   kit knows and is not recorded.
 - `PICKER_OPENED` — nothing could be chosen automatically, so the CLI picker was opened. The user

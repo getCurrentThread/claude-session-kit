@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- **Both ends of a hand-off are named, so the two sessions can SendMessage each other.** A session
+  started without a name gets one the CLI makes up and the kit never sees, and a first prompt arrives
+  on the command line with no sender, so neither side could address the other. A hand-off session
+  (`-Prompt`) is now always started with `-Name` — the user's name for it, or a short one made from
+  the task, the one exception to "never make a name up" — and the prompt carries the asking
+  session's own name (from ListAgents) to report back to (`references/handoff.md`). The launch result
+  now includes `name`, the new session's SendMessage address. Checked with Claude Code 2.1.312: a
+  session started with `--name X` is listed as `X` in ListAgents, and a message to it is answered
+  back once it is told to reply with SendMessage.
+- **The README is split by language.** `README.md` and `SKILL.md` are English only, and the Korean
+  README is now a full translation in `README-ko.md` (it replaces the short Korean summary). The
+  skill's trigger examples are English, and its description says that the same request in any
+  language counts.
+
 ## 0.3.0 — hand work to a new session, trust a folder on request
 
 - **Launch on a named model and effort, with a first prompt.** `open-workspace` and `new-temp-task`
