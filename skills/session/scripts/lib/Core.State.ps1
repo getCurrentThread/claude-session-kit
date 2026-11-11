@@ -549,16 +549,16 @@ function Get-ClaudeSessions {
     param(
         [string]$Path,
         [int]$Days = 30,
-        [string[]]$Kinds = @('interactive'),
-        [string]$ProjectsDir = (Get-ClaudeProjectsDir)
+        [string[]]$Kinds = @('interactive')
     )
-    if (-not (Test-Path -LiteralPath $ProjectsDir)) { return }
+    $projectsDir = Get-ClaudeProjectsDir
+    if (-not (Test-Path -LiteralPath $projectsDir)) { return }
 
     $dirs = if ($Path) {
-        $one = Join-Path $ProjectsDir (ConvertTo-ProjectSlug $Path)
+        $one = Join-Path $projectsDir (ConvertTo-ProjectSlug $Path)
         if (Test-Path -LiteralPath $one) { @(Get-Item -LiteralPath $one) } else { @() }
     } else {
-        @(Get-ChildItem -LiteralPath $ProjectsDir -Directory -ErrorAction SilentlyContinue)
+        @(Get-ChildItem -LiteralPath $projectsDir -Directory -ErrorAction SilentlyContinue)
     }
 
     $cutoff = (Get-Date).AddDays(-$Days)
@@ -809,19 +809,17 @@ function Resolve-ResumeTarget {
         [string]$SessionId,
         [int]$Days = 30,
         [switch]$AllowPicker,
-        [switch]$AllowSidecar,
         [object[]]$RunningSessions = @(),
         [switch]$IncludeOpen
     )
     $none = { param($reason) [pscustomobject]@{ Mode = 'none'; SessionId = $null; Cwd = $Path; Source = $null; Title = $null; Reason = $reason } }
-    $kinds = if ($AllowSidecar) { @('interactive', 'sidecar') } else { @('interactive') }
 
     if ($SessionId) {
         if (-not (Test-SessionIdFormat $SessionId)) { return (& $none "Not a session id: $SessionId") }
         $candidate = Find-SessionTranscript -SessionId $SessionId
         $found = if ($candidate) { Get-ClaudeSessionRecord -TranscriptPath $candidate }
         if (-not $found) { return (& $none "No transcript exists for session $SessionId.") }
-        if ($found.Kind -notin $kinds) { return (& $none "Session $SessionId is '$($found.Kind)', not an interactive CLI session.") }
+        if ($found.Kind -ne 'interactive') { return (& $none "Session $SessionId is '$($found.Kind)', not an interactive CLI session.") }
         $cwd = if ($found.Cwd) { $found.Cwd } else { $Path }
         if (-not $cwd) { return (& $none "Session $SessionId records no working directory.") }
         return [pscustomobject]@{ Mode = 'resume-id'; SessionId = $SessionId; Cwd = $cwd; Source = 'explicit'; Title = $found.Title; Reason = $null }
@@ -852,7 +850,7 @@ function Resolve-ResumeTarget {
         return [pscustomobject]@{ Mode = 'resume-id'; SessionId = $best.SessionId; Cwd = $best.Cwd; Source = 'registry'; Title = $best.Title; Reason = $null }
     }
 
-    $scanned = @(Get-ClaudeSessions -Path $Path -Days $Days -Kinds $kinds)
+    $scanned = @(Get-ClaudeSessions -Path $Path -Days $Days)
     foreach ($s in $scanned) {
         if ($open.ContainsKey($s.SessionId)) { [void]$skipped.Add($s.SessionId); continue }
         $cwd = if ($s.Cwd) { $s.Cwd } else { $Path }

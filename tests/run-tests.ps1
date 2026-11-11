@@ -1523,7 +1523,7 @@ foreach ($line in Get-Content -LiteralPath $PromptList) {
     $claudeArgs = Get-ClaudeArgs -Mode new -SessionId '11111111-1111-1111-1111-111111111111' -Model 'claude-opus-5-5[1m]' -Effort xhigh -Prompt $p
     Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'C:\bin\claude.exe' -ClaudeArgs $claudeArgs | Out-Null
     $seen = @(Get-Content -LiteralPath (Join-Path (Split-Path $Wt) 'argv.txt') | Where-Object { $_ } | ForEach-Object { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($_)) })
-    $want = New-WtArgumentList -WorkDir $PSScriptRoot -Exe 'C:\bin\claude.exe' -Arguments $claudeArgs -Window '0'
+    $want = New-WtArgumentList -WorkDir $PSScriptRoot -Exe 'C:\bin\claude.exe' -Arguments $claudeArgs
     if ((ConvertTo-Json $seen -Compress) -cne (ConvertTo-Json $want -Compress)) { "prompt #$i" }
 }
 '@)

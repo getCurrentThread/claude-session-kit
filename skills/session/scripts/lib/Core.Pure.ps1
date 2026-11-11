@@ -333,18 +333,16 @@ function ConvertTo-WtArgument {
     return ($Value -replace ';', '\;')
 }
 
-# Argument list for `& wt.exe @list`. Window '0' joins the most recent window (a
-# person is at the keyboard); 'new' never attaches to one, which is what logon
-# needs, where '0' would race whatever the user's own startup opens.
+# Argument list for `& wt.exe @list`. Window '0' joins the most recent window: a
+# person is at the keyboard.
 function New-WtArgumentList {
     param(
         [string]$WorkDir,
         [Parameter(Mandatory)][string]$Exe,
-        [string[]]$Arguments = @(),
-        [ValidateSet('0', 'new')][string]$Window = '0'
+        [string[]]$Arguments = @()
     )
     $list = [System.Collections.Generic.List[string]]::new()
-    $list.Add('-w'); $list.Add($Window); $list.Add('nt')
+    $list.Add('-w'); $list.Add('0'); $list.Add('nt')
     if ($WorkDir) { $list.Add('-d'); $list.Add((ConvertTo-WtArgument $WorkDir)) }
     # '--' ends wt's own option parsing; everything after it is the child's.
     $list.Add('--')
@@ -355,7 +353,8 @@ function New-WtArgumentList {
 
 # The RunOnce value. It deliberately carries NO working directory and NO prompt:
 # the resume script reads both from state.json, which keeps this string short and
-# free of anything that needs escaping.
+# free of anything that needs escaping. Window 'new' never attaches to an existing
+# one, which is what logon needs: '0' would race whatever the user's own startup opens.
 function New-RunOnceCommand {
     param(
         [Parameter(Mandatory)][string]$PowerShellExe,

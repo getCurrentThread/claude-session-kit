@@ -39,7 +39,7 @@ function Start-ClaudeTerminal {
     foreach ($name in $script:InheritedSessionVariables) { Remove-Item -LiteralPath "Env:$name" -ErrorAction Ignore }
     $wt = Resolve-WindowsTerminal
     if ($wt) {
-        $wtArgs = New-WtArgumentList -WorkDir $WorkDir -Exe $ClaudeExe -Arguments $ClaudeArgs -Window '0'
+        $wtArgs = New-WtArgumentList -WorkDir $WorkDir -Exe $ClaudeExe -Arguments $ClaudeArgs
         & $wt @wtArgs
         Show-TerminalWindow
         return 'wt'
