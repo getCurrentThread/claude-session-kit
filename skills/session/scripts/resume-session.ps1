@@ -8,7 +8,7 @@
     1. -SessionId, when given (it must exist; an id is never guessed)
     2. the launcher registry -- sessions this kit opened, newest first
     3. a scan of interactive transcripts from the last -Days days
-    4. the CLI's own picker, opened in the folder (needs -Alias or -Path)
+    4. the CLI's own picker, opened in the folder (needs -Alias or -Path; not with -NoPicker)
 
   With -Alias or -Path the search is limited to that folder; without either it
   spans every folder, and step 4 is unavailable. Steps 2 and 3 skip sessions that
@@ -35,6 +35,9 @@
   default: a silent fork makes "the latest session" point at the copy next time.
   The copy gets a new id (sessionId; forkedFrom names the original) and is recorded
   like any launch -- except a fork from the CLI's picker, whose id only the CLI knows.
+
+.PARAMETER NoPicker
+  Stop after step 3: NO_RESUMABLE_SESSION instead of opening the CLI's picker.
 #>
 [CmdletBinding()]
 param(

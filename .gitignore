@@ -4,7 +4,15 @@ aliases.json
 sessions.jsonl
 state*.json
 plan.json
-next-prompt.txt
+next-prompt*.txt
 resume-prompt.txt
 private-tokens.txt
+claude.json.before-trust
+open-sessions/
+runtime/
+archive/
 *.log
+*.log.1
+
+# Per-session files other tools leave in the working folder.
+.claude/

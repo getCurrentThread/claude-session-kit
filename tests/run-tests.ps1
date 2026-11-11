@@ -1,4 +1,4 @@
-#requires -Version 7.0
+#requires -Version 7.5
 <#
 .SYNOPSIS
   Test suite for claude-session-kit. No Pester, no network, no terminal tab, no reboot.
@@ -10,6 +10,7 @@
   Scripts that would open a tab are only ever driven into their refusal paths,
   reboot-commit.ps1 is only ever run with -Simulate, and the resume script is only
   ever pointed (CLAUDE_CODE_BIN) at stand-ins for `claude` that record their argv.
+  PowerShell 7.5: the trust tests read with ConvertFrom-Json -DateKind, like the writer.
 
       pwsh -NoProfile -File tests/run-tests.ps1
 #>
@@ -871,7 +872,7 @@ $r = Invoke-SessionLaunch -WorkDir $Dir -Mode new -Source open -Model $Model -Ef
 @{ result = $r; argv = $script:argv } | ConvertTo-Json -Compress -Depth 4
 '@)
         $lib = Join-Path $scripts 'lib\Core.Effects.ps1'
-        $note = 'Read the handoff note to the end; SECRET-MARKER-7, then show a plan first.'
+        $note = 'Read the hand-off note to the end; SECRET-MARKER-7, then show a plan first.'
         function Launch($Claude, $Prompt, $Model, $Effort) {
             $out = & pwsh -NoProfile -ExecutionPolicy Bypass -File $probe -Lib $lib -Dir $titled -Claude $Claude -Prompt $Prompt -Model $Model -Effort $Effort 2>&1 | Select-Object -Last 1
             return [pscustomobject]@{ Text = "$out"; Json = ("$out" | ConvertFrom-Json) }
@@ -1281,7 +1282,7 @@ Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'claude.exe' -ClaudeArgs 
         (Same $empty.Json.code 'RESUME_PENDING') -and (Same $empty.Json.unreadable $true) -and
         (Same $partial.Json.code 'RESUME_PENDING') -and (Same $partial.Json.sessionId 'x') -and (Same $partial.Json.unreadable $false)
     }
-    Check 'reboot-plan: stale handoff (or one dated in the future) is refused; -AllowStalePrompt overrides explicitly' {
+    Check 'reboot-plan: stale hand-off (or one dated in the future) is refused; -AllowStalePrompt overrides explicitly' {
         (Get-Item $promptFile).LastWriteTime = (Get-Date).AddMinutes(-31)
         try {
             $r = Invoke-Script 'reboot-plan.ps1' @('-WorkDir', $plain, '-PromptFile', $promptFile, '-Replace')
@@ -1292,7 +1293,7 @@ Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'claude.exe' -ClaudeArgs 
         } finally { (Get-Item $promptFile).LastWriteTime = Get-Date }
         (Same $r.Json.code 'PROMPT_STALE') -and (Same $r.Json.ok $false) -and (Same $override.Json.code 'REBOOT_PLANNED') -and (Same $future.Json.code 'PROMPT_STALE')
     }
-    Check 'reboot-cancel -Status: other session ids and folders, without the handoff' {
+    Check 'reboot-cancel -Status: other session ids and folders, without the hand-off' {
         $r = Invoke-Script 'reboot-cancel.ps1' @('-Status')
         (Same $r.Json.state.othersCount 1) -and (Same $r.Json.state.others[0].sessionId $second) -and
         (Same $r.Json.state.others[0].workdir $otherDir) -and ($r.Text -notmatch 'SECRET-MARKER')
@@ -1353,7 +1354,7 @@ Start-ClaudeTerminal -WorkDir $PSScriptRoot -ClaudeExe 'claude.exe' -ClaudeArgs 
         $handed = [IO.File]::ReadAllText((Join-Path $kitHome 'resume-prompt.txt'))
         -not (Get-ChildItem -LiteralPath $sandbox -Recurse -Filter 'INJECTED.marker') -and
         ($argsSeen -match [regex]::Escape("--resume $newer --")) -and ($argsSeen -match 'resume-prompt\.txt') -and ($argsSeen -notmatch 'pwned|USERNAME') -and
-        ($handed -ceq $nasty) -and -not (Test-Path (Get-KitPath state)) -and (Test-Path (Get-KitPath stateLast)) -and ($r.Text -notmatch 'pwned')
+        ($handed -ceq $nasty) -and -not (Test-Path (Get-KitPath state)) -and (Test-Path (Join-Path (Split-Path -Parent (Get-KitPath state)) 'state.last.json')) -and ($r.Text -notmatch 'pwned')
     }
     # A real executable that records its argv: built with the C# compiler that ships with Windows PowerShell 5.1.
     $echoExe = Join-Path $sandbox 'echo args ; bin\claude.exe'
@@ -1589,7 +1590,7 @@ foreach ($line in Get-Content -LiteralPath $PromptList) {
     Check 'manifests are valid and the plugin declares no "skills" key (it would replace auto-scan)' {
         $p = Get-Content (Join-Path $repo '.claude-plugin\plugin.json') -Raw | ConvertFrom-Json
         $m = Get-Content (Join-Path $repo '.claude-plugin\marketplace.json') -Raw | ConvertFrom-Json
-        (Same $p.name 'claude-session-kit') -and ('skills' -notin $p.PSObject.Properties.Name) -and (Same $m.plugins[0].name $p.name) -and (Same $m.plugins[0].version $p.version) -and
+        (Same $p.name 'claude-session-kit') -and ('skills' -notin $p.PSObject.Properties.Name) -and (Same $m.plugins[0].name $p.name) -and (Same $m.plugins[0].version $p.version) -and (Same $m.metadata.version $p.version) -and
         (Test-Path (Join-Path $repo 'skills\session\SKILL.md'))
     }
     Check 'SKILL.md and references/ use ${CLAUDE_SKILL_DIR}, not a fixed install path or %USERPROFILE%' {

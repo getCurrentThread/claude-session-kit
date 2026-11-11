@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased — hand-off notes go to the scratchpad
+
+- **Hand-off notes are written to the asking session's scratchpad directory** (`%TEMP%\claude\…`),
+  both the first prompt's note (`references/handoff.md`) and a reboot's `next-prompt-<id>.txt`
+  (`references/reboot.md`), so they go when the user empties Temp instead of piling up in
+  `~\.claude\handoffs\` and the state folder, where nothing deleted them. Only a session with no
+  scratchpad uses those two places. A reboot note is needed only until the commit (the plan carries
+  its text); a first-prompt note is read again after a compact, so the launch result tells the user
+  not to empty Temp while that session still works. No script changes: `reboot-plan.ps1` takes the
+  note by `-PromptFile` and never looks for it.
+- **Listing and searching sessions is about three times faster.** The first lines of each transcript
+  were collected with `List.Add($line)`, and PowerShell hands every .NET method argument to the
+  antimalware scan (AMSI); a transcript line can be megabytes. They are collected as loop output now.
+  On 536 transcripts (1.4 GB): `list-sessions` about 10 s to 3.9 s, `list-candidates` 10.2 s to
+  3.2 s, a search with no hit 10.2 s to 3.4 s, with the same results.
+- **`-TrustFolder` says that it needs PowerShell 7.5.** It reads `~/.claude.json` with
+  `ConvertFrom-Json -DateKind`, which older versions do not have; they now get `TRUST_WRITE_FAILED`
+  with that reason before anything is read. The README names the requirement.
+- **Small corrections.** `.gitignore` guards the files the kit writes today (`next-prompt-<id>.txt`,
+  `claude.json.before-trust`, `open-sessions\`, `runtime\`, `archive\`, `kit.log.1`) and other tools'
+  `.claude\` folder; the README's state list names `claude.json.before-trust` and `kit.log.1`;
+  `new-temp-task.ps1`'s help lists `TRUST_REFUSED`; `Write-KitResult` loses a `-Data` parameter
+  nothing passed.
+- **Wording and leftovers.** A session name refuses double quotes, not every quote, and the message,
+  `SKILL.md` and `references/handoff.md` now say so. Prose says "hand-off" throughout; the file
+  and folder names keep their spelling. The README names the Claude Code version of the latest check
+  (2.1.312) and `resume-session.ps1 -NoPicker`, which the script's help and `SKILL.md` now describe.
+  `restore-open.ps1 -List` is gone (listing is what the script does without an action), and so is
+  `Get-KitPath stateLast`, which only a test used. The tests compare `metadata.version` with
+  `plugin.json` too, and require the PowerShell 7.5 they always needed.
+
 ## 0.4.0 — a hand-off can message back
 
 - **Both ends of a hand-off are named, so the two sessions can SendMessage each other.** A session
@@ -85,7 +116,7 @@
   enabled.
 - **Reboot and continue brings the other open sessions back too** (at most eight, each re-checked:
   interactive transcript, existing folder, trusted), in their own tabs and without a prompt.
-  `-OnlyThis` keeps the old behaviour. The handoff note has a fixed template.
+  `-OnlyThis` keeps the old behaviour. The hand-off note has a fixed template.
 - **Stale-state guards.** `reboot-plan.ps1` refuses to plan over a resume that is still pending
   (`RESUME_PENDING`, `-Replace`) and refuses a prompt file older than 30 minutes (`PROMPT_STALE`,
   `-AllowStalePrompt`).
@@ -120,13 +151,13 @@
   its record, and a moved session opens in the folder it moved to (the last `relocated` record, as the
   CLI decides). The archive indexes the project folders once instead of once per missing registry row.
   `reboot-plan.ps1` reports an empty or partial `state.json` as `RESUME_PENDING` and refuses a
-  handoff dated in the future; the logon script waits for missing extra folders once (30 s in all,
+  hand-off dated in the future; the logon script waits for missing extra folders once (30 s in all,
   not 30 s each). A background session gets `claude attach <jobId>` advice instead of "switch to
   that tab".
   `--permission-mode default` is recorded as `manual`. An invalid `cleanupPeriodDays` or a
   settings file that is not strict JSON is reported as such, and `7.0` counts as 7. A typed prompt
   that starts with `<` can be a title, and a first-prompt title scores as message text in search.
-  Docs: one handoff file per session (`next-prompt-<id>.txt`), `-Query:` (a term may start with
+  Docs: one hand-off file per session (`next-prompt-<id>.txt`), `-Query:` (a term may start with
   `-`), titles and snippets are data, restore lists closed windows too.
 - Tests: the suite never runs the real `claude` (a stand-in answers `claude agents --json`), and a
   check fails if it ever does. It opens no console window.

@@ -36,14 +36,13 @@ function Get-KitRoot {
 }
 
 function Get-KitPath {
-    param([Parameter(Mandatory)][ValidateSet('aliases', 'registry', 'openSessions', 'state', 'stateLast', 'plan', 'log', 'runtime', 'archive', 'trustBackup')][string]$Name)
+    param([Parameter(Mandatory)][ValidateSet('aliases', 'registry', 'openSessions', 'state', 'plan', 'log', 'runtime', 'archive', 'trustBackup')][string]$Name)
     $root = Get-KitRoot
     switch ($Name) {
         'aliases' { Join-Path $root 'aliases.json' }
         'registry' { Join-Path $root 'sessions.jsonl' }
         'openSessions' { Join-Path $root 'open-sessions' }
         'state' { Join-Path $root 'state.json' }
-        'stateLast' { Join-Path $root 'state.last.json' }
         'plan' { Join-Path $root 'plan.json' }
         'log' { Join-Path $root 'kit.log' }
         'runtime' { Join-Path $root 'runtime' }
@@ -66,12 +65,10 @@ function Write-KitResult {
     param(
         [Parameter(Mandatory)][bool]$Ok,
         [Parameter(Mandatory)][string]$Code,
-        [string]$Message,
-        [System.Collections.IDictionary]$Data
+        [string]$Message
     )
     $o = [ordered]@{ ok = $Ok; code = $Code }
     if ($Message) { $o.message = $Message }
-    if ($Data) { foreach ($k in $Data.Keys) { $o[$k] = $Data[$k] } }
     Write-Output ($o | ConvertTo-Json -Compress -Depth 6)
 }
 
@@ -240,7 +237,7 @@ function Get-WorkspaceShips {
                 continue
             }
             if ($doc['hooks'] -is [System.Collections.IDictionary]) {
-                foreach ($event in $doc['hooks'].Values) { foreach ($m in @($event)) { if ($m -is [System.Collections.IDictionary]) { $hooks += @($m['hooks'] | Where-Object { $_ }).Count } } }
+                foreach ($entries in $doc['hooks'].Values) { foreach ($m in @($entries)) { if ($m -is [System.Collections.IDictionary]) { $hooks += @($m['hooks'] | Where-Object { $_ }).Count } } }
             }
             if ($doc['permissions'] -is [System.Collections.IDictionary]) { $allow += @($doc['permissions']['allow'] | Where-Object { $_ }).Count }
             if ($doc['env'] -is [System.Collections.IDictionary]) { $envKeys += $doc['env'].Count }
@@ -285,6 +282,8 @@ function Set-WorkspaceTrusted {
     }
     $fail = { param($why) [ordered]@{ ok = $false; code = 'TRUST_WRITE_FAILED'; trustKey = $key; message = "Could not mark the folder trusted ($why). Nothing was written or opened." } }
     if (-not (Test-Path -LiteralPath $ConfigFile -PathType Leaf)) { return (& $fail 'Claude Code has no config file yet: run claude once') }
+    # ConvertFrom-Json -DateKind (below) exists from PowerShell 7.5 on.
+    if ($PSVersionTable.PSVersion -lt [version]'7.5') { return (& $fail "this needs PowerShell 7.5 or later; this is $($PSVersionTable.PSVersion)") }
 
     # mkdir is the lock: it fails atomically when the directory exists. .NET's
     # CreateDirectory succeeds on an existing one, so the Win32 call is used.
@@ -469,13 +468,16 @@ function Get-RegisteredSessions {
 function Get-ClaudeSessionRecord {
     param([Parameter(Mandatory)][string]$TranscriptPath, [int]$HeadLines = 120, [int]$TailBytes = 64KB)
 
-    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines = @()
     $tail = @()
     try {
         $fs = [IO.File]::Open($TranscriptPath, 'Open', 'Read', 'ReadWrite, Delete')   # a live session holds it open
         try {
             $reader = [IO.StreamReader]::new($fs, [Text.Encoding]::UTF8)
-            while ($lines.Count -lt $HeadLines -and -not $reader.EndOfStream) { $lines.Add($reader.ReadLine()) }
+            # Collected as output, never List.Add($line): PowerShell hands every .NET method
+            # argument to AMSI, and a transcript line can be megabytes (536 transcripts: 6.4 s against 0.6 s).
+            $n = 0
+            $lines = @(while ($n -lt $HeadLines -and $null -ne ($line = $reader.ReadLine())) { $n++; $line })
             if (-not $reader.EndOfStream) {
                 $start = [Math]::Max(0, $fs.Length - $TailBytes)
                 # One byte early, so the first piece is always a part line to drop: empty
@@ -491,7 +493,7 @@ function Get-ClaudeSessionRecord {
             LastWrite = [datetime]::MinValue; TranscriptPath = $TranscriptPath
         }
     }
-    $info = Get-TranscriptHeadInfo -Lines $lines.ToArray() -TailLines $tail
+    $info = Get-TranscriptHeadInfo -Lines $lines -TailLines $tail
     $file = Get-Item -LiteralPath $TranscriptPath
     return [pscustomobject]@{
         # The file name IS the session id; the sessionId fields inside agree with it.

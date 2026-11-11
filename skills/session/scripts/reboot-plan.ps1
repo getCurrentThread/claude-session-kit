@@ -80,7 +80,7 @@ try {
         # UTC, and bounded on both sides: a file dated in the future would stay "fresh" until then.
         $age = [DateTime]::UtcNow - (Get-Item -LiteralPath $PromptFile).LastWriteTimeUtc
         if (-not $AllowStalePrompt -and ($age.TotalMinutes -gt 30 -or $age.TotalMinutes -lt -5)) {
-            Exit-WithResult ([ordered]@{ ok = $false; code = 'PROMPT_STALE'; path = $PromptFile; message = 'The prompt file is more than 30 minutes old (or dated in the future). Rewrite the handoff or use -AllowStalePrompt.' })
+            Exit-WithResult ([ordered]@{ ok = $false; code = 'PROMPT_STALE'; path = $PromptFile; message = 'The prompt file is more than 30 minutes old (or dated in the future). Rewrite the hand-off or use -AllowStalePrompt.' })
         }
         # -Raw yields nothing at all for a zero-byte file; interpolation turns that into ''.
         $Prompt = "$(Get-Content -LiteralPath $PromptFile -Raw -Encoding UTF8)".Trim()

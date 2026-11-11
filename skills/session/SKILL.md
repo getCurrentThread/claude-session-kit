@@ -104,7 +104,7 @@ When the user gives the new session a name ("open the blog folder and call it re
 title, the CLI's own `/resume` picker and `list-sessions.ps1` all show it, and it is the session's
 SendMessage address. Never make a name up — except for a hand-off (`-Prompt`), which is always named
 so the two sessions can message each other (`references/handoff.md`).
-`INVALID_NAME` — the name holds a character that cannot pass through the terminal safely (quotes,
+`INVALID_NAME` — the name holds a character that cannot pass through the terminal safely (double quotes,
 backslashes, `%`, `& | < > ^ !`); nothing was opened. Offer the name without them.
 
 **Model, effort and a first prompt** ("open X on Opus xhigh and hand this off"). Add `-Model` and
@@ -237,7 +237,7 @@ Safety rules:
   `forkedFrom` names the original. A fork made in the CLI's picker (`PICKER_OPENED`) has no id the
   kit knows and is not recorded.
 - `PICKER_OPENED` — nothing could be chosen automatically, so the CLI picker was opened. The user
-  picks in that tab.
+  picks in that tab. `-NoPicker` reports `NO_RESUMABLE_SESSION` instead of opening it.
 - `NO_RESUMABLE_SESSION` — there is nothing to reopen. Ask whether to start a new one (§1); do not
   silently switch to a new session. `retentionDays` is how far back transcripts exist at all: an older
   session was deleted by Claude Code (see "Retention and archive"); `null` means the setting is
@@ -274,7 +274,7 @@ is the last lock. Every other script is built so that it cannot restart the mach
 check that.
 
 Once step 1 is passed, **read `${CLAUDE_SKILL_DIR}/references/reboot.md` and follow steps 2–6
-there** — the handoff note, the session id, the read-only plan, the commit, and what to tell the
+there** — the hand-off note, the session id, the read-only plan, the commit, and what to tell the
 user for each `code`. Never run `reboot-plan.ps1` or `reboot-commit.ps1` without it. Run
 `reboot-commit.ps1` only with the step 1 approval still the user's latest message, and only with the
 token `reboot-plan.ps1` returned: never a guessed token, never an edited `plan.json`.
@@ -287,7 +287,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/reboo
 ```
 
 `-Status` includes `state.othersCount` and `state.others` (session ids and working directories),
-so report which other sessions are pending too. It never prints the handoff prompt.
+so report which other sessions are pending too. It never prints the hand-off prompt.
 
 This script **cannot start** a restart. For a "cancel" or "check" request, never run the §3 scripts.
 On `NOTHING_PENDING`, say exactly that: nothing was scheduled. On `RUNONCE_NOT_REMOVED`, the resume

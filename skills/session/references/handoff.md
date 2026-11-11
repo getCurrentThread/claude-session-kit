@@ -8,8 +8,10 @@
    or a tool result. Keep it to a sentence or two.
 
 2. **Longer instructions go in a hand-off note.** Write it with the **Write tool** (UTF-8, and no shell
-   touches the text) to the file the user named, or else to
-   `<home>\.claude\handoffs\<topic>-<YYYY-MM-DD>.md`; give Write the expanded absolute path. Put in it
+   touches the text) to the file the user named, or else to `<topic>-<YYYY-MM-DD>.md` in your own
+   scratchpad directory (the one your system prompt names), so the note goes when the user empties
+   Temp; only when no scratchpad is listed, to `<home>\.claude\handoffs\<topic>-<YYYY-MM-DD>.md`.
+   Give Write the expanded absolute path. Put in it
    the goal, the context and decisions so far, the constraints, and how to proceed (for example "show
    a plan and wait for approval before changing anything"). Paths and commands are fine; **secrets are
    not** — say where a credential lives, never copy it. The prompt then only points at the note:
@@ -20,7 +22,7 @@
    address the other: a session started without a name gets one the CLI makes up, which the kit never
    sees, and the prompt arrives on the command line with no sender.
    - **The new session always gets `-Name`**: the user's name for it, or else a short one you make from
-     the task (two to four words; no quotes, backslashes, `%` or `& | < > ^ !`; not the name of a
+     the task (two to four words; no double quotes, backslashes, `%` or `& | < > ^ !`; not the name of a
      session that is open now). That name is its address in ListAgents and for SendMessage.
    - **The prompt carries your own session's name.** The first line of ListAgents says
      `This session is <name> [<ref>]`; use the bare name. Add a line such as
@@ -38,7 +40,9 @@
 
 5. **Read the result.** `LAUNCHED` with `promptChars` means the prompt went with the tab; `name` is
    the new session's SendMessage address, and `model` and `effort` repeat what was passed. Tell the
-   user the folder, the session name, the model and effort, and the note's path. The kit never prints
+   user the folder, the session name, the model and effort, and the note's path; a note in your
+   scratchpad goes when Temp is emptied, so say not to empty it while that session still works on the
+   hand-off (it may read the note again after a compact). The kit never prints
    or logs the prompt itself, only its length. To send more later, SendMessage to that name (append
    the `[<ref>]` ListAgents shows only when two sessions share it), and say in the message to answer
    with SendMessage: a session answers in its own tab otherwise. A message between sessions in

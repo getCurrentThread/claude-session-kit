@@ -3,11 +3,13 @@
 `${CLAUDE_SKILL_DIR}` below is the skill folder SKILL.md was loaded from.
 Step 1 — the user's explicit approval — is in SKILL.md §3 and must already be passed.
 
-2. **Leave a structured handoff note.** Write the prompt that becomes the resumed session's first
-   input to `next-prompt-<session id>.txt` in the state folder
-   (`<home>\.claude\claude-session-kit\next-prompt-<UUID>.txt`, the UUID from step 3; plain
-   `next-prompt.txt` only when the id is unknown) **with the Write tool** (guarantees UTF-8). One file
-   per session, so another session's note can never become this one's handoff. Give Write the expanded absolute path, not a variable.
+2. **Leave a structured hand-off note.** Write the prompt that becomes the resumed session's first
+   input to `next-prompt-<session id>.txt` in your own scratchpad directory (the one your system
+   prompt names; the UUID from step 3; plain `next-prompt.txt` only when the id is unknown) **with the
+   Write tool** (guarantees UTF-8). The plan carries the text from step 4 on, so the file is not
+   needed after the commit and goes when the user empties Temp. Only when no scratchpad is listed,
+   write it to the state folder (`<home>\.claude\claude-session-kit\`) instead. One file
+   per session, so another session's note can never become this one's hand-off. Give Write the expanded absolute path, not a variable.
    Fill every heading in this template with concrete details; write "None" when nothing failed:
    ```
    Why the machine restarted
@@ -43,7 +45,7 @@ Step 1 — the user's explicit approval — is in SKILL.md §3 and must already 
      prompt is handed over in `resume-prompt.txt` instead of on the command line. Nothing to do.
    - `alsoResume` lists the other open interactive sessions that will return (at most eight).
      Tell the user their titles/ids and folders, and that they reopen **without a prompt**; only
-     the primary receives the handoff. `skipped` lists excluded sessions and reasons, including
+     the primary receives the hand-off. `skipped` lists excluded sessions and reasons, including
      any cut by the cap. Other folders must already be trusted. Add `-OnlyThis` when only the
      primary should return. `IDLE` means the session is still running but its transcript has not
      been written for over `-MaxIdleHours` (default 24) — typically a claude left in a terminal
@@ -52,7 +54,7 @@ Step 1 — the user's explicit approval — is in SKILL.md §3 and must already 
    - `RESUME_PENDING` (`ok=false`) means `state.json` already holds a registered resume; report
      its `sessionId`, `workdir` and `createdAt`. Use `-Replace` only when replacing it is intended.
    - `PROMPT_STALE` (`ok=false`) means the prompt file is over 30 minutes old (or dated in the
-     future). Rewrite the handoff; `-AllowStalePrompt` explicitly permits reusing it.
+     future). Rewrite the hand-off; `-AllowStalePrompt` explicitly permits reusing it.
 
    If the user wants to restart by hand, add `-NoReboot` (registers only). The `alsoResume` list is
    fixed at plan time: those sessions reopen at that logon even if they are closed in between, so

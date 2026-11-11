@@ -9,7 +9,7 @@
   on purpose. A candidate is not running now, and its transcript exists and is an
   interactive one. Newest first, numbered 1..n.
 
-    (default) / -List   list the candidates; opens nothing
+    (default)           list the candidates; opens nothing
     -All / -Ids 1,3     reopen each in its own tab, in the folder recorded for it
     -Forget 2,4         drop those records without opening anything
     -ForgetAll          drop every candidate's record
@@ -33,7 +33,6 @@
 #>
 [CmdletBinding(PositionalBinding = $false)]
 param(
-    [switch]$List,
     [switch]$All,
     # Text, not [int[]]: pwsh -File hands "-Ids 1,3" over as the one string '1,3',
     # which an [int[]] parameter reads as 13.
@@ -49,9 +48,9 @@ $ErrorActionPreference = 'Stop'
 try {
     Initialize-KitState | Out-Null
 
-    $actions = @('List', 'All', 'Ids', 'Forget', 'ForgetAll' | Where-Object { $PSBoundParameters.ContainsKey($_) })
+    $actions = @('All', 'Ids', 'Forget', 'ForgetAll' | Where-Object { $PSBoundParameters.ContainsKey($_) })
     if ($actions.Count -gt 1) {
-        Exit-WithResult ([ordered]@{ ok = $false; code = 'CONFLICTING_OPTIONS'; options = $actions; message = 'Use one of -List, -All, -Ids, -Forget or -ForgetAll. Nothing was opened or forgotten.' })
+        Exit-WithResult ([ordered]@{ ok = $false; code = 'CONFLICTING_OPTIONS'; options = $actions; message = 'Use one of -All, -Ids, -Forget or -ForgetAll. Nothing was opened or forgotten.' })
     }
 
     $runningRows = @(Get-RunningSessions)

@@ -17,7 +17,7 @@
 
 ## 요구 사항
 
-Windows 10/11 · [PowerShell 7](https://aka.ms/powershell) (`pwsh`) · Claude Code CLI (2.1.302에서
+Windows 10/11 · [PowerShell 7](https://aka.ms/powershell) (`pwsh`; `-TrustFolder`는 7.5 이상 필요) · Claude Code CLI (2.1.312에서
 테스트했습니다. `claude agents --json`은 2.1.145 이상이 필요하고, 그보다 오래된 버전에서는 CLI 자체의
 프로세스별 기록으로 대신합니다) · Windows Terminal 권장 (없으면 일반 콘솔 창을 씁니다).
 
@@ -112,7 +112,7 @@ hand-off는 양쪽 끝에 이름을 붙여, 두 세션이 Claude Code 자체의 
 보고할 곳으로 요청한 세션의 이름을 알려 줍니다.
 
 **이전 세션 다시 열기.** `resume-session.ps1`은 이 순서로 세션을 고릅니다: **런처 레지스트리** →
-**최근 30일 대화형 transcript 스캔** → 그 폴더에서 **CLI 자체 피커**(`claude --resume`). 지금 열려
+**최근 30일 대화형 transcript 스캔** → 그 폴더에서 **CLI 자체 피커**(`claude --resume`; `-NoPicker`를 주면 피커를 열지 않고 찾지 못했다고 알립니다). 지금 열려
 있는 세션은 — 요청한 세션도 — 건너뜁니다(`-Fork`일 때는 아님). 예약 실행이나 SDK 실행이 쓴
 transcript는 후보가 아니고, `claude --continue`는 절대 쓰지 않습니다 — 폴더에서 가장 최근 것을
 가리지 않고 다시 여는데, 그것이 자동화의 대화일 수 있기 때문입니다.
@@ -227,10 +227,17 @@ Claude Code는 폴더마다 한 번 신뢰하는지 묻습니다. 런처가 연 
 
 모든 것은 `%USERPROFILE%\.claude\claude-session-kit\`에 있습니다 — `aliases.json`, `sessions.jsonl`
 (레지스트리), `open-sessions\`(열린 대화형 세션마다 하나, 훅이 씀), `plan.json` / `state.json` /
-`state.last.json`(재부팅), `next-prompt-<id>.txt`, `resume-prompt.txt`(`.cmd` shim일 때만),
-`runtime\resume.ps1`(고정 사본), `archive\`(`archive-sessions.ps1`을 실행했을 때만; transcript의 단순
-사본), `kit.log`. 이어 갈 프롬프트는 재개에 필요하므로 상태 파일에 저장되지만, 로그에는 **절대** 쓰지
+`state.last.json`(재부팅), `resume-prompt.txt`(`.cmd` shim일 때만),
+`runtime\resume.ps1`(고정 사본), `claude.json.before-trust`(`-TrustFolder`를 쓴 뒤에만; 마지막 신뢰
+기록 직전의 `~/.claude.json`이고 그 파일만큼 민감합니다), `archive\`(`archive-sessions.ps1`을 실행했을
+때만; transcript의 단순 사본), `kit.log`(와 직전 1 MB분인 `kit.log.1`). 이어 갈 프롬프트는 재개에
+필요하므로 상태 파일에 저장되지만, 로그에는 **절대** 쓰지
 않고(길이와 짧은 해시 앞부분만 기록합니다) `-Status`로도 보여 주지 않습니다.
+
+hand-off 노트(첫 프롬프트가 가리키는 노트와 재부팅의 `next-prompt-<id>.txt`)는 요청한 세션의 스크래치
+폴더(`%TEMP%\claude\` 아래)에 쓰므로 Temp를 비울 때 함께 지워지고, 그 밖에는 아무것도 지우지
+않습니다. 스크래치 폴더가 없는 세션만 `~\.claude\handoffs\`(재부팅 노트는 상태 폴더)에 씁니다.
+hand-off 세션이 아직 일하는 동안에는 Temp를 비우지 마세요: compact 뒤에 노트를 다시 읽을 수 있습니다.
 
 알아 둘 부작용: 열린 세션을 확인할 때 읽기 전용 질의인 `claude agents --json`을 실행합니다. 다른
 `claude` 시작과 마찬가지로 이것이 `~/.claude.json`을 갱신할 수 있습니다(새 설정 파일은 1회
@@ -249,7 +256,7 @@ Claude Code는 폴더마다 한 번 신뢰하는지 묻습니다. 런처가 연 
 | `list-candidates.ps1` | 가장 많이 쓴 폴더(이미 등록된 폴더에는 `alias`가 붙음) | 없음 |
 | `new-temp-task.ps1 [-Name] [-Model] [-Effort] [-Prompt:]` | 새 임시 폴더 + 새 세션 | 폴더, 터미널 탭 |
 | `open-workspace.ps1 -Alias\|-Path [-Name] [-Model] [-Effort] [-Prompt:]` | 작업 폴더에서 새 세션 | 터미널 탭 |
-| `resume-session.ps1 [-Alias\|-Path] [-SessionId] [-Fork]` | 세션 다시 열기 | 터미널 탭 |
+| `resume-session.ps1 [-Alias\|-Path] [-SessionId] [-Fork] [-NoPicker]` | 세션 다시 열기 | 터미널 탭 |
 | `restore-open.ps1 [-All\|-Ids\|-Forget\|-ForgetAll]` | 크래시나 창 닫힘으로 열린 채 남은 세션 | 터미널 탭; 다시 열 수 없는 기록 정리; `-Forget`은 기록 삭제 |
 | `archive-sessions.ps1 [-All] [-List]` | transcript 백업 | `archive\`에 복사 |
 | `reboot-plan.ps1` | 재부팅 후 재개 계획 | `plan.json`만 씀 |
@@ -263,7 +270,7 @@ Claude Code는 폴더마다 한 번 신뢰하는지 묻습니다. 런처가 연 
 pwsh -NoProfile -File tests/run-tests.ps1
 ```
 
-Pester도 네트워크도 쓰지 않습니다. 버리는 샌드박스(`CLAUDE_SESSION_KIT_HOME`, `CLAUDE_CONFIG_DIR`)에서
+Pester도 네트워크도 쓰지 않고, PowerShell 7.5 이상이 필요합니다. 버리는 샌드박스(`CLAUDE_SESSION_KIT_HOME`, `CLAUDE_CONFIG_DIR`)에서
 돌고, 탭을 열지 않고, 재부팅을 예약하지 않고, 진짜 `claude`를 실행하지 않으며(대역이
 `claude agents --json`에 답합니다), 정확한 RunOnce 문자열, `wt` 인자 목록, `claude` argv를 검증합니다.
 훅에는 녹화해 둔 훅 입력을 stdin으로 넣고, 여러 세션 재개는 PowerShell 7과 Windows PowerShell 5.1

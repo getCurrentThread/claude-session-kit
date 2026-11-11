@@ -194,7 +194,7 @@ function Open-OtherSessions {
         }
     }
     $seen = @{}; $count = 0
-    # One wait for all of them: the primary, which carries the handoff, opens after this loop.
+    # One wait for all of them: the primary, which carries the hand-off, opens after this loop.
     # A stopwatch, not the clock: time sync can step the clock back right after logon.
     $waited = [System.Diagnostics.Stopwatch]::StartNew()
     foreach ($other in @($state.others)) {

@@ -175,13 +175,13 @@ $script:ReplayablePermissionModes = @('acceptEdits', 'auto', 'manual', 'dontAsk'
 
 # A session name rides on wt's command line, and wt rebuilds the child's command line
 # quoting only on spaces and escaping nothing, then expands %VAR%; behind a .cmd shim
-# cmd.exe also reads & | < > ^ !. So a quote, backslash or tab would split the name into
+# cmd.exe also reads & | < > ^ !. So a double quote, backslash or tab would split the name into
 # claude arguments of its own. A display name needs none of these. $null when fine.
 function Get-NameRefusal([string]$Name) {
     if (-not $Name -or $Name -notmatch '[\x00-\x1F\x7F"%\\&|<>^!]') { return $null }
     return [ordered]@{
         ok = $false; code = 'INVALID_NAME'; name = $Name
-        message = 'A session name cannot hold quotes, backslashes, tabs or line breaks, % or & | < > ^ !. Nothing was opened.'
+        message = 'A session name cannot hold double quotes, backslashes, tabs or line breaks, % or & | < > ^ !. Nothing was opened.'
     }
 }
 

@@ -11,7 +11,7 @@
   folder that was deleted still owns its project history under ~/.claude/projects,
   and reusing its number would drop the new session into that old history.
 
-  Prints one JSON object. code: LAUNCHED | UNTRUSTED_WORKSPACE | TRUST_WRITE_FAILED | PATH_NOT_FOUND | CLAUDE_NOT_FOUND |
+  Prints one JSON object. code: LAUNCHED | UNTRUSTED_WORKSPACE | TRUST_REFUSED | TRUST_WRITE_FAILED | PATH_NOT_FOUND | CLAUDE_NOT_FOUND |
   CLAUDE_IS_SHIM | INVALID_NAME | INVALID_MODEL | INVALID_EFFORT | INVALID_PROMPT
 
 .PARAMETER Name

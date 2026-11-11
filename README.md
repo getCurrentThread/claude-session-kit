@@ -17,8 +17,8 @@ This repository used to be `reboot-continue`. It was renamed when the launcher w
 
 ## Requirements
 
-Windows 10/11 · [PowerShell 7](https://aka.ms/powershell) (`pwsh`) · Claude Code CLI (tested on
-2.1.302; `claude agents --json` needs 2.1.145 or later, and older versions fall back to the CLI's own
+Windows 10/11 · [PowerShell 7](https://aka.ms/powershell) (`pwsh`; `-TrustFolder` needs 7.5 or later) · Claude Code CLI (tested on
+2.1.312; `claude agents --json` needs 2.1.145 or later, and older versions fall back to the CLI's own
 per-process records) · Windows Terminal recommended (without it a plain console window is used).
 
 **The plugin installs two hooks.** `SessionStart` and `SessionEnd` run
@@ -114,7 +114,7 @@ ListAgents), and the prompt tells it the asking session's name to report back to
 
 **Resume.** `resume-session.ps1` picks a session in this order: the **launcher registry** → a **scan of
 interactive transcripts from the last 30 days** → the **CLI's own picker** (`claude --resume`) in that
-folder. Sessions that are open right now — the asking one included — are skipped (not by `-Fork`). Transcripts written
+folder (`-NoPicker` stops before it and reports that nothing was found). Sessions that are open right now — the asking one included — are skipped (not by `-Fork`). Transcripts written
 by scheduled or SDK runs are never candidates, and `claude --continue` is never used — it reopens
 whatever is newest in a folder, which may be an automation's conversation.
 
@@ -196,10 +196,10 @@ reboot-commit.ps1 -Token <t>
   session whose transcript has not been written for over `-MaxIdleHours` (default 24) is skipped as
   `IDLE`: it is running, but in a terminal nobody looks at. After
   logon each opens in its own tab with `claude --resume <id>` and **no prompt**; only the asking
-  session gets the handoff. `-OnlyThis` brings back the asking session alone. The commit step
+  session gets the hand-off. `-OnlyThis` brings back the asking session alone. The commit step
   re-validates that list (UUIDs, existing local folders, no duplicates, the cap) like everything else
   it takes from `plan.json`.
-- **The handoff note has a fixed shape** — why the machine restarted, what is done, what was tried and
+- **The hand-off note has a fixed shape** — why the machine restarted, what is done, what was tried and
   failed, the next steps, and the command to verify first — so the resumed session starts informed.
 - **Stale state is refused.** A plan over a resume that is still pending returns `RESUME_PENDING`
   instead of silently replacing another session's resume (`-Replace` to mean it), and a prompt file
@@ -237,11 +237,19 @@ the whole repository.
 
 Everything lives in `%USERPROFILE%\.claude\claude-session-kit\` — `aliases.json`, `sessions.jsonl`
 (registry), `open-sessions\` (one record per open interactive session, written by the hooks),
-`plan.json` / `state.json` / `state.last.json` (reboot), `next-prompt-<id>.txt`, `resume-prompt.txt` (only
-with a `.cmd` shim), `runtime\resume.ps1` (frozen copy), `archive\` (only if you run
-`archive-sessions.ps1`; plain copies of transcripts), `kit.log`. The continuation prompt is stored in
+`plan.json` / `state.json` / `state.last.json` (reboot), `resume-prompt.txt` (only
+with a `.cmd` shim), `runtime\resume.ps1` (frozen copy), `claude.json.before-trust` (only after
+`-TrustFolder`: `~/.claude.json` as it was before the last trust write, as private as that file),
+`archive\` (only if you run `archive-sessions.ps1`; plain copies of transcripts), `kit.log` (and
+`kit.log.1`, the previous megabyte). The continuation prompt is stored in
 the state files because the resume needs it; it is **never** written to the log (which records its
 length and a short hash prefix) or echoed by `-Status`.
+
+Hand-off notes — the first prompt's note and a reboot's `next-prompt-<id>.txt` — are written to the
+asking session's scratchpad directory under `%TEMP%\claude\`, so they go when you empty Temp; nothing
+else deletes them. Only a session with no scratchpad writes them to `~\.claude\handoffs\` or, for a
+reboot note, the state folder. Do not empty Temp while a hand-off session still works: it may read its
+note again after a compact.
 
 Side effect worth knowing: asking which sessions are open runs `claude agents --json`, a read-only
 query. Like any `claude` start it may update `~/.claude.json` (a fresh config gets its one-time
@@ -259,7 +267,7 @@ All under `skills/session/scripts/`, all print one JSON object (`ok`, `code`, `m
 | `list-candidates.ps1` | most-used folders (`alias` is set on those already registered) | none |
 | `new-temp-task.ps1 [-Name] [-Model] [-Effort] [-Prompt:]` | new scratch folder + new session | folder, terminal tab |
 | `open-workspace.ps1 -Alias\|-Path [-Name] [-Model] [-Effort] [-Prompt:]` | new session in a workspace | terminal tab |
-| `resume-session.ps1 [-Alias\|-Path] [-SessionId] [-Fork]` | reopen a session | terminal tab |
+| `resume-session.ps1 [-Alias\|-Path] [-SessionId] [-Fork] [-NoPicker]` | reopen a session | terminal tab |
 | `restore-open.ps1 [-All\|-Ids\|-Forget\|-ForgetAll]` | sessions left open by a crash or closed window | terminal tabs; prunes records that can never be reopened; `-Forget` deletes records |
 | `archive-sessions.ps1 [-All] [-List]` | back up transcripts | copies into `archive\` |
 | `reboot-plan.ps1` | plan a reboot-and-resume | writes `plan.json` only |
@@ -273,7 +281,7 @@ All under `skills/session/scripts/`, all print one JSON object (`ok`, `code`, `m
 pwsh -NoProfile -File tests/run-tests.ps1
 ```
 
-No Pester, no network. Runs in a throwaway sandbox (`CLAUDE_SESSION_KIT_HOME`, `CLAUDE_CONFIG_DIR`),
+No Pester, no network; needs PowerShell 7.5 or later. Runs in a throwaway sandbox (`CLAUDE_SESSION_KIT_HOME`, `CLAUDE_CONFIG_DIR`),
 opens no tab, schedules no reboot, never runs the real `claude` (a stand-in answers
 `claude agents --json`), and asserts the exact RunOnce string, `wt` argument list and `claude` argv.
 The hook is fed recorded hook input on stdin; the multi-session resume runs against stand-ins for
