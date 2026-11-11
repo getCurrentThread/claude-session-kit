@@ -489,8 +489,9 @@ $bg = Invoke-SessionLaunch -WorkDir $Dir -Mode resume -SessionId $Id -RunningSes
         } finally { $env:CLAUDE_CODE_ENTRYPOINT = $keep.ep; $env:CLAUDE_PID = $keep.cp }
     }
 
-    Check 'command line: split by the Win32 backslash and quote rules' {
-        Same (Split-CommandLine 'a "b c" d\\"e f" "g\"h" i\j') @('a', 'b c', 'd\e f', 'g"h', 'i\j')
+    Check 'command line: split by the C runtime''s backslash and quote rules' {
+        (Same (Split-CommandLine 'a "b c" d\\"e f" "g\"h" i\j') @('a', 'b c', 'd\e f', 'g"h', 'i\j')) -and
+        (Same (Split-CommandLine 'x "a ""b"" c" d') @('x', 'a "b" c', 'd'))
     }
     Check 'start mode: read off the claude command line; a prompt that merely mentions the flag is not the flag' {
         (Same (Get-StartPermissionMode '"C:\bin\claude.exe" --permission-mode plan --name "a b"') 'plan') -and

@@ -676,8 +676,10 @@ function Get-RunningSessions {
 # crash, a closed window or a power cut -- what restore-open.ps1 offers to reopen. One
 # file per session rather than a shared log: sessions start and end concurrently.
 
-# Win32 argument splitting (the CommandLineToArgvW rules), enough to read flags back off
-# a process command line: a quoted prompt that merely mentions a flag stays one argument.
+# Argument splitting by the Microsoft C runtime's rules (what a program gets as argv; unlike
+# CommandLineToArgvW, "" inside quotes is one quote and the quotes stay open), enough to
+# read flags back off a process command line: a quoted prompt that merely mentions a flag
+# stays one argument.
 function Split-CommandLine {
     param([string]$CommandLine)
     $out = [System.Collections.Generic.List[string]]::new()
