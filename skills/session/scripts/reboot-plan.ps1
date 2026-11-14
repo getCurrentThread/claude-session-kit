@@ -19,6 +19,11 @@
     4. none -> a FRESH session carrying the prompt. `claude --continue` is never
        used: it would reopen whatever conversation is newest, an automation's included.
 
+  The other open interactive sessions come back too (at most eight, without a prompt),
+  each in its own trusted recorded folder, unless -OnlyThis. One whose transcript has
+  not been written for 24 hours is skipped as IDLE: a claude left running in a terminal
+  nobody looks at is open, but it is not work in progress.
+
   Prints one JSON object.
   code: REBOOT_PLANNED | PATH_NOT_FOUND | PROMPT_NOT_FOUND | UNTRUSTED_WORKSPACE |
         CLAUDE_NOT_FOUND | SESSION_REJECTED | RUNONCE_TOO_LONG | RESUME_PENDING | PROMPT_STALE
@@ -29,12 +34,6 @@
 
 .PARAMETER NoReboot
   Plan a registration only; the user reboots by hand and the resume fires at the next logon.
-
-.PARAMETER MaxIdleHours
-  Another open session comes back only if its transcript was written within this many
-  hours (default 24). Older ones are skipped as IDLE: a claude left running in a terminal
-  nobody looks at (another app's background terminal host keeps them alive for days) is
-  open, but it is not work in progress.
 #>
 [CmdletBinding()]
 param(
@@ -42,12 +41,8 @@ param(
     [string]$PromptFile = '',
     [string]$SessionId = '',
     [string]$WorkDir = '',
-    [int]$DelaySeconds = 30,
     [switch]$NoReboot,
-    [switch]$OnlyThis,
-    [ValidateRange(1, 87600)][int]$MaxIdleHours = 24,
-    [switch]$Replace,
-    [switch]$AllowStalePrompt
+    [switch]$OnlyThis
 )
 
 $ErrorActionPreference = 'Stop'
@@ -58,12 +53,12 @@ $ErrorActionPreference = 'Stop'
 try {
     Initialize-KitState | Out-Null
 
-    if ((Test-Path -LiteralPath (Get-KitPath state)) -and -not $Replace) {
+    if (Test-Path -LiteralPath (Get-KitPath state)) {
         # Read like reboot-cancel does: an empty or partial file is still a pending resume.
         $pending = $null
         try { $pending = Get-Content -LiteralPath (Get-KitPath state) -Raw -Encoding UTF8 | ConvertFrom-Json } catch {}
         $field = { param($n) if ($pending -and $pending.PSObject.Properties[$n]) { $pending.$n } }
-        Exit-WithResult ([ordered]@{ ok = $false; code = 'RESUME_PENDING'; sessionId = [string](& $field 'session_id'); workdir = [string](& $field 'workdir'); createdAt = (& $field 'created_at'); unreadable = ($null -eq $pending); message = 'A resume is already pending. Use -Replace to plan over it.' })
+        Exit-WithResult ([ordered]@{ ok = $false; code = 'RESUME_PENDING'; sessionId = [string](& $field 'session_id'); workdir = [string](& $field 'workdir'); createdAt = (& $field 'created_at'); unreadable = ($null -eq $pending); message = 'A resume is already pending. Cancel it with reboot-cancel.ps1, then plan again.' })
     }
 
     if (-not $WorkDir) { $WorkDir = (Get-Location).Path }
@@ -79,8 +74,8 @@ try {
         }
         # UTC, and bounded on both sides: a file dated in the future would stay "fresh" until then.
         $age = [DateTime]::UtcNow - (Get-Item -LiteralPath $PromptFile).LastWriteTimeUtc
-        if (-not $AllowStalePrompt -and ($age.TotalMinutes -gt 30 -or $age.TotalMinutes -lt -5)) {
-            Exit-WithResult ([ordered]@{ ok = $false; code = 'PROMPT_STALE'; path = $PromptFile; message = 'The prompt file is more than 30 minutes old (or dated in the future). Rewrite the hand-off or use -AllowStalePrompt.' })
+        if ($age.TotalMinutes -gt 30 -or $age.TotalMinutes -lt -5) {
+            Exit-WithResult ([ordered]@{ ok = $false; code = 'PROMPT_STALE'; path = $PromptFile; message = 'The prompt file is more than 30 minutes old (or dated in the future). Rewrite the hand-off, then plan again.' })
         }
         # -Raw yields nothing at all for a zero-byte file; interpolation turns that into ''.
         $Prompt = "$(Get-Content -LiteralPath $PromptFile -Raw -Encoding UTF8)".Trim()
@@ -149,9 +144,9 @@ try {
     $sessionMode = if ($SessionId) { 'resume' } else { 'fresh' }
 
     # Only open interactive sessions with their own trusted recorded folder, written
-    # within -MaxIdleHours, come back.
+    # within the last 24 hours, come back.
     $others = @(); $alsoResume = @(); $skipped = @(); $seen = @{}
-    $idleCutoff = (Get-Date).AddHours(-$MaxIdleHours)
+    $idleCutoff = (Get-Date).AddHours(-24)
     if (-not $OnlyThis) {
         foreach ($row in @(Get-RunningSessions)) {
             $id = $row.SessionId
@@ -200,8 +195,6 @@ try {
         Exit-WithResult ([ordered]@{ ok = $false; code = 'RUNONCE_TOO_LONG'; length = $runOnce.Length; message = 'The RunOnce command would exceed 260 characters and Windows would silently skip it. Nothing was planned.' })
     }
 
-    if ($DelaySeconds -lt 30) { $DelaySeconds = 30 }   # other apps may hold unsaved work
-
     $token = -join ((1..8) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) })
     $plan = [ordered]@{
         token          = $token
@@ -211,19 +204,18 @@ try {
         session_mode   = $sessionMode
         others         = @($others)
         prompt         = $Prompt
-        delay_seconds  = $DelaySeconds
         no_reboot      = [bool]$NoReboot
         runonce        = $runOnce
         runtime_script = $runtimeScript
     }
     [IO.File]::WriteAllText((Get-KitPath plan), ($plan | ConvertTo-Json -Depth 5), [Text.UTF8Encoding]::new($false))
-    Write-KitLog ("reboot-plan token={0} mode={1} session={2} prompt={3} cwd={4}" -f $token, $sessionMode, $SessionId, (Get-TextDigest $Prompt), $WorkDir)
+    Write-KitLog ("reboot-plan token={0} mode={1} session={2} promptChars={3} cwd={4}" -f $token, $sessionMode, $SessionId, $Prompt.Length, $WorkDir)
 
     Exit-WithResult ([ordered]@{
             ok = $true; code = 'REBOOT_PLANNED'; token = $token; expiresInSeconds = 600
             workdir = $WorkDir; sessionMode = $sessionMode; sessionId = $SessionId; sessionSource = $sessionSource
             alsoResume = @($alsoResume); skipped = @($skipped)
-            prompt = (Get-TextDigest $Prompt); delaySeconds = $DelaySeconds; willReboot = (-not $NoReboot)
+            promptChars = $Prompt.Length; willReboot = (-not $NoReboot)
             runOnce = $runOnce; promptDelivery = $(if ($shim) { 'file' } else { 'argv' })
             message = $(if ($sessionMode -eq 'fresh') {
                     'Planned. No resumable interactive session was identified, so a FRESH session carrying the prompt will start after logon. Nothing has been registered or scheduled yet.'

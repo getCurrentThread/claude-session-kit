@@ -52,22 +52,19 @@ function Start-ClaudeTerminal {
 }
 
 # The one entry point behind new-temp-task / open-workspace / resume-session.
-# Checks trust, mints or reuses a session id, opens the tab, records the session.
+# Checks trust, mints a session id for a new session, opens the tab.
 # Returns the hashtable to print; never throws for an expected refusal.
 function Invoke-SessionLaunch {
     param(
         [Parameter(Mandatory)][string]$WorkDir,
-        [Parameter(Mandatory)][ValidateSet('new', 'resume', 'picker')][string]$Mode,
+        [Parameter(Mandatory)][ValidateSet('new', 'resume')][string]$Mode,
         [string]$SessionId,
         [string]$Alias,
-        [ValidateSet('new', 'open', 'resume')][string]$Source = 'open',
         [string]$Name,
         # model, effort and first prompt: only what the person asked for, as they said it
         [string]$Model,
         [string]$Effort,
         [string]$Prompt,
-        [string]$PermissionMode,
-        [switch]$Fork,
         # Marks the folder trusted in ~/.claude.json first, so no prompt appears. Only on the person's say-so.
         [switch]$TrustFolder,
         # Get-RunningSessions rows the caller already has: each query starts a process
@@ -95,15 +92,14 @@ function Invoke-SessionLaunch {
     }
 
     # Two tabs on one conversation interleave their writes into the same transcript.
-    # A fork is a new conversation, and a picker chooses in the tab, so neither is refused.
-    if ($Mode -eq 'resume' -and -not $Fork) {
+    if ($Mode -eq 'resume') {
         $rows = if ($PSBoundParameters.ContainsKey('RunningSessions')) { @($RunningSessions) } else { @(Get-RunningSessions) }
         $running = $rows | Where-Object { $_.SessionId -eq $SessionId } | Select-Object -First 1
         if ($running) {
             # A background session has no tab to switch to; `claude attach` takes its job id, not the session id.
             $jobId = if ($running.PSObject.Properties['JobId'] -and $running.JobId) { [string]$running.JobId } else { $null }
             $message = if ($running.Kind -ne 'background') {
-                'That session is already open in another terminal. Nothing was opened; switch to that tab, or resume with -Fork to work on a copy.'
+                'That session is already open in another terminal. Nothing was opened; switch to that tab.'
             } elseif ($jobId) {
                 "That session is running in the background, not in a tab. Nothing was opened; ``claude attach $jobId`` opens it in a terminal."
             } else {
@@ -116,13 +112,8 @@ function Invoke-SessionLaunch {
         }
     }
 
-    if ($Mode -eq 'new' -and -not $SessionId) { $SessionId = [guid]::NewGuid().ToString() }
-    # A fork is created under an id minted here, so it can be recorded like any launch.
-    $forkedFrom = $null
-    $forkId = $null
-    if ($Fork -and $Mode -eq 'resume') { $forkedFrom = $SessionId; $forkId = [guid]::NewGuid().ToString() }
-    $claudeArgs = Get-ClaudeArgs -Mode $Mode -SessionId $SessionId -Name $Name -Model $Model -Effort $Effort -Prompt $Prompt -PermissionMode $PermissionMode -Fork:$Fork -ForkSessionId $forkId
-    if ($forkId) { $SessionId = $forkId }
+    if ($Mode -eq 'new') { $SessionId = [guid]::NewGuid().ToString() }
+    $claudeArgs = Get-ClaudeArgs -Mode $Mode -SessionId $SessionId -Name $Name -Model $Model -Effort $Effort -Prompt $Prompt
 
     # Written only after every refusal above, so a refused launch never leaves trust behind.
     $trustWritten = $false
@@ -133,29 +124,20 @@ function Invoke-SessionLaunch {
     }
 
     $launcher = Start-ClaudeTerminal -WorkDir $WorkDir -ClaudeExe $claude -ClaudeArgs $claudeArgs
-
-    # A picker has no id at all: it cannot be recorded truthfully, so it is not.
-    $registered = $false
-    if ($SessionId -and $Mode -ne 'picker') {
-        try { Register-LaunchedSession -SessionId $SessionId -Cwd $WorkDir -Alias $Alias -Source $Source -Name $Name; $registered = $true } catch {}
-    }
+    # Resume looks at these first. The tab is open by now, so a failed write is only logged.
+    try { Register-LaunchedSession -SessionId $SessionId -Cwd $WorkDir } catch { Write-KitLog "registry write failed: $($_.Exception.Message)" }
     # the prompt's length only, never its text
-    Write-KitLog ("launch mode={0} source={1} launcher={2} session={3} forkedFrom={4} model={5} effort={6} promptChars={7} cwd={8}" -f $Mode, $Source, $launcher, $SessionId, $forkedFrom, $Model, $Effort, $Prompt.Length, $WorkDir)
+    Write-KitLog ("launch mode={0} launcher={1} session={2} model={3} effort={4} promptChars={5} cwd={6}" -f $Mode, $launcher, $SessionId, $Model, $Effort, $Prompt.Length, $WorkDir)
 
-    $code = switch ($Mode) { 'new' { 'LAUNCHED' } 'resume' { 'RESUMED' } 'picker' { 'PICKER_OPENED' } }
-    $message = switch ($Mode) {
-        'new' { 'A new session was opened in a terminal tab.' }
-        'resume' { 'The session was reopened in a terminal tab.' }
-        'picker' { "No session could be chosen automatically; the CLI's own session picker was opened in that folder." }
-    }
+    $new = $Mode -eq 'new'
+    $message = if ($new) { 'A new session was opened in a terminal tab.' } else { 'The session was reopened in a terminal tab.' }
     if ($trustWritten) { $message += ' The folder was marked trusted in Claude Code first (-TrustFolder), so no trust prompt was shown.' }
 
     $result = [ordered]@{
-        ok = $true; code = $code; path = $WorkDir; alias = $(if ($Alias) { $Alias } else { $null }); mode = $Mode
-        sessionId = $SessionId; registered = $registered; launcher = $launcher; message = $message
+        ok = $true; code = $(if ($new) { 'LAUNCHED' } else { 'RESUMED' }); path = $WorkDir; alias = $(if ($Alias) { $Alias } else { $null })
+        sessionId = $SessionId; launcher = $launcher; message = $message
     }
     if ($trustWritten) { $result['trustWritten'] = $true; $result['trustKey'] = Get-TrustKey -Path $WorkDir }
-    if ($forkedFrom) { $result['forkedFrom'] = $forkedFrom }
     # the name is also the session's SendMessage address in ListAgents
     if ($Name) { $result['name'] = $Name }
     if ($Model) { $result['model'] = $Model }

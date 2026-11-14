@@ -25,7 +25,7 @@ function Get-ClaudeConfigFile {
 function Get-ClaudeProjectsDir { return (Join-Path (Get-ClaudeHome) 'projects') }
 
 # CLAUDE_SESSION_KIT_HOME exists so the test suite can run against a scratch
-# directory instead of a person's real aliases and session registry.
+# directory instead of a person's real aliases and state.
 #
 # Returned in canonical form (no '..', no 8.3 short names): reboot-plan.ps1 renders
 # the RunOnce command from it and reboot-commit.ps1 compares that command with its
@@ -36,17 +36,15 @@ function Get-KitRoot {
 }
 
 function Get-KitPath {
-    param([Parameter(Mandatory)][ValidateSet('aliases', 'registry', 'openSessions', 'state', 'plan', 'log', 'runtime', 'archive', 'trustBackup')][string]$Name)
+    param([Parameter(Mandatory)][ValidateSet('aliases', 'registry', 'state', 'plan', 'log', 'runtime', 'trustBackup')][string]$Name)
     $root = Get-KitRoot
     switch ($Name) {
         'aliases' { Join-Path $root 'aliases.json' }
         'registry' { Join-Path $root 'sessions.jsonl' }
-        'openSessions' { Join-Path $root 'open-sessions' }
         'state' { Join-Path $root 'state.json' }
         'plan' { Join-Path $root 'plan.json' }
         'log' { Join-Path $root 'kit.log' }
         'runtime' { Join-Path $root 'runtime' }
-        'archive' { Join-Path $root 'archive' }
         'trustBackup' { Join-Path $root 'claude.json.before-trust' }
     }
 }
@@ -80,19 +78,8 @@ function Exit-WithResult {
     if ($Result['ok']) { exit 0 } else { exit 1 }
 }
 
-# A prompt is never logged or echoed: it routinely holds absolute paths, branch
-# names and plans, and logs are what people paste into bug reports.
-function Get-TextDigest {
-    param([AllowEmptyString()][string]$Text)
-    if (-not $Text) { return 'empty' }
-    $sha = [Security.Cryptography.SHA256]::Create()
-    try {
-        $hash = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text))
-    } finally { $sha.Dispose() }
-    $hex = -join ($hash[0..5] | ForEach-Object { $_.ToString('x2') })
-    return ("sha256:{0} len:{1}" -f $hex, $Text.Length)
-}
-
+# A prompt is never logged or echoed, only its length: it routinely holds absolute
+# paths, branch names and plans, and logs are what people paste into bug reports.
 function Write-KitLog {
     param([Parameter(Mandatory)][string]$Message)
     try {
@@ -333,12 +320,14 @@ function Read-AliasDocument {
     $file = Get-KitPath aliases
     if (-not (Test-Path -LiteralPath $file)) { return $null }
     try {
-        return (Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json)
+        $doc = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json -AsHashtable
     } catch {
         # Reaches the model as INTERNAL_ERROR from whichever script needed an alias,
         # so the message has to say which file to fix.
         throw "aliases.json is not valid JSON ($file): $($_.Exception.Message)"
     }
+    if ($doc -isnot [System.Collections.IDictionary]) { throw "aliases.json is not a JSON object ($file)." }
+    return $doc
 }
 
 function Get-AliasTable {
@@ -384,63 +373,39 @@ function Get-TempTaskSettings {
     $root = Join-Path $env:USERPROFILE 'Downloads'
     $prefix = 'test'
     try {
-        $doc = Read-AliasDocument
-        if ($doc) {
-            $tt = $doc.PSObject.Properties | Where-Object { $_.Name -eq 'tempTask' } | Select-Object -First 1
-            if ($tt -and $tt.Value -is [pscustomobject]) {
-                foreach ($f in $tt.Value.PSObject.Properties) {
-                    if ($f.Name -eq 'root' -and $f.Value) { $root = [Environment]::ExpandEnvironmentVariables([string]$f.Value) }
-                    if ($f.Name -eq 'prefix' -and $f.Value) { $prefix = [string]$f.Value }
-                }
-            }
-        }
+        $tt = (Read-AliasDocument)['tempTask']
+        if ($tt['root']) { $root = [Environment]::ExpandEnvironmentVariables([string]$tt['root']) }
+        if ($tt['prefix']) { $prefix = [string]$tt['prefix'] }
     } catch {}
     return [pscustomobject]@{ Root = $root; Prefix = $prefix }
 }
 
-# List-returning functions below stream their rows; collect them with @( ).
-
-# --- session registry -----------------------------------------------------------------
-# sessions.jsonl is append-only: one JSON object per line, one line per session
-# this kit opened. It is the FIRST place resume looks, because it holds only
-# sessions a person started on purpose, with the folder recorded at launch rather
-# than reverse-engineered later. It is never rewritten in place, and a damaged
-# line costs that line, not the file.
+# --- launched sessions ---------------------------------------------------------------------
+# sessions.jsonl is append-only: one JSON object per line, one line per session this
+# kit opened. Resume looks here FIRST: it holds only sessions a person started on
+# purpose, while the newest transcript on the machine is usually another tool's.
+# It is never rewritten in place, and a damaged line costs that line, not the file.
 function Register-LaunchedSession {
-    param(
-        [Parameter(Mandatory)][string]$SessionId,
-        [Parameter(Mandatory)][string]$Cwd,
-        [string]$Alias,
-        [ValidateSet('new', 'open', 'resume')][string]$Source = 'open',
-        [string]$Name
-    )
-    $record = [ordered]@{
-        sessionId = $SessionId
-        cwd       = $Cwd
-        alias     = $(if ($Alias) { $Alias } else { $null })
-        source    = $Source
-        startedAt = (Get-Date).ToString('o')
-        name      = $(if ($Name) { $Name } else { $null })
-    } | ConvertTo-Json -Compress
-
-    $file = Get-KitPath registry
+    param([Parameter(Mandatory)][string]$SessionId, [Parameter(Mandatory)][string]$Cwd)
+    # alias and source are read by nothing here; the 0.4.0 reader runs in strict mode and drops a row without them
+    $record = [ordered]@{ sessionId = $SessionId; cwd = $Cwd; alias = $null; source = $null; startedAt = (Get-Date).ToString('o') } | ConvertTo-Json -Compress
     $mutex = [Threading.Mutex]::new($false, 'Local\ClaudeSessionKitRegistry')
     $held = $false
     try {
         try { $held = $mutex.WaitOne(3000) } catch [Threading.AbandonedMutexException] { $held = $true }
-        [IO.File]::AppendAllText($file, $record + "`n", [Text.UTF8Encoding]::new($false))
+        [IO.File]::AppendAllText((Get-KitPath registry), $record + "`n", [Text.UTF8Encoding]::new($false))
     } finally {
         if ($held) { $mutex.ReleaseMutex() }
         $mutex.Dispose()
     }
 }
 
+# Rows SessionId, Cwd for the sessions launched in the last -Days days.
 function Get-RegisteredSessions {
     param([int]$Days = 30)
     $file = Get-KitPath registry
     if (-not (Test-Path -LiteralPath $file)) { return }
     $cutoff = (Get-Date).AddDays(-$Days)
-    $out = [System.Collections.Generic.List[object]]::new()
     foreach ($line in [IO.File]::ReadAllLines($file)) {
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
         try {
@@ -448,16 +413,9 @@ function Get-RegisteredSessions {
             if (-not (Test-SessionIdFormat $r.sessionId) -or -not $r.cwd) { continue }
             # "o"-format timestamps are auto-converted to DateTime by ConvertFrom-Json on PS7.
             $started = if ($r.startedAt -is [datetime]) { $r.startedAt } else { [datetime]::Parse([string]$r.startedAt) }
-            if ($started -lt $cutoff) { continue }
-            $out.Add([pscustomobject]@{
-                    SessionId = [string]$r.sessionId; Cwd = [string]$r.cwd; Alias = [string]$r.alias
-                    Source = [string]$r.source; StartedAt = $started
-                    # rows written before names existed have no such member, and strict mode throws on one
-                    Name = $(if ($r.PSObject.Properties['name']) { [string]$r.name } else { '' })
-                })
+            if ($started -ge $cutoff) { [pscustomobject]@{ SessionId = [string]$r.sessionId; Cwd = [string]$r.cwd } }
         } catch { continue }
     }
-    return $out.ToArray()
 }
 
 # --- transcripts ---------------------------------------------------------------------------
@@ -489,7 +447,7 @@ function Get-ClaudeSessionRecord {
         } finally { $fs.Dispose() }
     } catch {
         return [pscustomobject]@{
-            SessionId = $null; Kind = 'unreadable'; Cwd = $null; Title = $null; TitleSource = $null
+            SessionId = $null; Kind = 'unreadable'; Cwd = $null; Title = $null
             LastWrite = [datetime]::MinValue; TranscriptPath = $TranscriptPath
         }
     }
@@ -501,45 +459,9 @@ function Get-ClaudeSessionRecord {
         Kind           = $info.Kind
         Cwd            = $info.Cwd
         Title          = $info.Title
-        TitleSource    = $info.TitleSource   # custom | ai | prompt | $null
         LastWrite      = $file.LastWriteTime
         TranscriptPath = $file.FullName
     }
-}
-
-# Which -Terms occur in the words of a transcript (Get-MessageText, case-insensitive),
-# plus one line around the first hit. Only lines holding a term somewhere are parsed.
-# shortcut: matching is OrdinalIgnoreCase; a few exotic letters (Turkish dotted and
-# dotless i, decomposed accents) fold differently in rg (Select-String runs Ordinal), so
-# a session hinging on one of them can differ between the two prefilters. Fine for prose.
-function Search-TranscriptMessages {
-    param([Parameter(Mandatory)][string]$TranscriptPath, [Parameter(Mandatory)][string[]]$Terms, [int]$SnippetLength = 120)
-    $ic = [StringComparison]::OrdinalIgnoreCase
-    # On disk a term's quotes and backslashes are JSON-escaped.
-    $escaped = @($Terms | ForEach-Object { $_.Replace('\', '\\').Replace('"', '\"') })
-    $found = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    $snippet = $null
-    try {
-        $fs = [IO.File]::Open($TranscriptPath, 'Open', 'Read', 'ReadWrite, Delete')
-        try {
-            $reader = [IO.StreamReader]::new($fs, [Text.Encoding]::UTF8)
-            while ($found.Count -lt $Terms.Count -and $null -ne ($line = $reader.ReadLine())) {
-                $hit = $false
-                for ($i = 0; $i -lt $Terms.Count -and -not $hit; $i++) {
-                    $hit = -not $found.Contains($Terms[$i]) -and $line.IndexOf($escaped[$i], $ic) -ge 0
-                }
-                if (-not $hit) { continue }
-                $text = Get-MessageText -Line $line
-                if (-not $text) { continue }
-                foreach ($t in $Terms) {
-                    if ($found.Contains($t) -or $text.IndexOf($t, $ic) -lt 0) { continue }
-                    [void]$found.Add($t)
-                    if (-not $snippet) { $snippet = ConvertTo-OneLine -Text $text -Max $SnippetLength -Term $t }
-                }
-            }
-        } finally { $fs.Dispose() }
-    } catch {}
-    return [pscustomobject]@{ Found = @($found); Snippet = $snippet }
 }
 
 # Lists transcripts, newest first. NOT recursive, and that is load-bearing: project
@@ -576,37 +498,6 @@ function Get-ClaudeSessions {
         }
     }
     return ($out.ToArray() | Sort-Object LastWrite -Descending)
-}
-
-# --- transcript retention (READ ONLY) ---------------------------------------------------------
-# Claude Code deletes transcripts older than cleanupPeriodDays (default 30) from its
-# user settings.json. This only reports the number. Nothing in this kit writes that
-# file: it holds the person's permissions, hooks and environment.
-# shortcut: the user's own settings.json only; managed policy or project settings can set a
-# lower value that wins. Read managed-settings.json too if that turns out to bite.
-# Source: settings | default (no file or no key) | invalid (Days $null: the file is not strict
-# JSON or the value is not a whole number of 1 or more -- the CLI reports a settings error then).
-function Get-TranscriptRetention {
-    $settingsFile = Join-Path (Get-ClaudeHome) 'settings.json'
-    $default = [pscustomobject]@{ Days = 30; Source = 'default' }
-    $invalid = [pscustomobject]@{ Days = $null; Source = 'invalid' }
-    $raw = $null
-    try { $raw = [IO.File]::ReadAllText($settingsFile) } catch {}
-    # the CLI loads a blank file as empty settings
-    if ([string]::IsNullOrWhiteSpace($raw)) { return $default }
-    try {
-        # Settings files are strict JSON; ConvertFrom-Json alone also takes comments and trailing commas.
-        ([Text.Json.JsonDocument]::Parse($raw)).Dispose()
-        $settings = $raw | ConvertFrom-Json -AsHashtable
-    } catch { return $invalid }
-    if ($settings -isnot [System.Collections.IDictionary] -or -not $settings.Contains('cleanupPeriodDays')) { return $default }
-    $days = $settings['cleanupPeriodDays']
-    # 7.0 parses as a double here and as 7 in the CLI; 0 is rejected since v2.1.89, and so is
-    # anything past 2^53 - 1 (the CLI's safe-integer limit; it would overflow [long] as a double)
-    if (($days -is [int] -or $days -is [long] -or $days -is [double] -or $days -is [decimal]) -and $days -ge 1 -and $days -le 9007199254740991 -and [math]::Floor($days) -eq $days) {
-        return [pscustomobject]@{ Days = [long]$days; Source = 'settings' }
-    }
-    return $invalid
 }
 
 # --- running sessions (READ ONLY) ------------------------------------------------------------
@@ -669,126 +560,7 @@ function Get-RunningSessions {
     }
 }
 
-# --- open sessions ------------------------------------------------------------------------------
-# <kit>\open-sessions\<sessionId>.json: one file per interactive session that started
-# and has not been ended on purpose. track-session.ps1 (a SessionStart/SessionEnd hook)
-# writes and deletes them, so a file that outlives its session is a session lost to a
-# crash, a closed window or a power cut -- what restore-open.ps1 offers to reopen. One
-# file per session rather than a shared log: sessions start and end concurrently.
-
-# Argument splitting by the Microsoft C runtime's rules (what a program gets as argv; unlike
-# CommandLineToArgvW, "" inside quotes is one quote and the quotes stay open), enough to
-# read flags back off a process command line: a quoted prompt that merely mentions a flag
-# stays one argument.
-function Split-CommandLine {
-    param([string]$CommandLine)
-    $out = [System.Collections.Generic.List[string]]::new()
-    $cur = [Text.StringBuilder]::new()
-    $s = [string]$CommandLine; $i = 0; $inQuote = $false; $any = $false
-    while ($i -lt $s.Length) {
-        $c = $s[$i]
-        if ($c -eq '\') {
-            $n = 0; while ($i -lt $s.Length -and $s[$i] -eq '\') { $n++; $i++ }
-            if ($i -lt $s.Length -and $s[$i] -eq '"') {
-                # 2n backslashes + quote: n backslashes, and the quote still toggles;
-                # 2n+1: n backslashes and a literal quote
-                [void]$cur.Append([char]'\', [int][math]::Floor($n / 2))
-                if ($n % 2) { [void]$cur.Append([char]'"'); $i++ }
-            } else {
-                [void]$cur.Append([char]'\', $n)
-            }
-            $any = $true; continue
-        }
-        if ($c -eq '"') {
-            if ($inQuote -and $i + 1 -lt $s.Length -and $s[$i + 1] -eq '"') { [void]$cur.Append([char]'"'); $i += 2; continue }
-            $inQuote = -not $inQuote; $any = $true; $i++; continue
-        }
-        if (-not $inQuote -and ($c -eq ' ' -or $c -eq "`t")) {
-            if ($any) { $out.Add($cur.ToString()); [void]$cur.Clear(); $any = $false }
-            $i++; continue
-        }
-        [void]$cur.Append($c); $any = $true; $i++
-    }
-    if ($any) { $out.Add($cur.ToString()) }
-    return , $out.ToArray()
-}
-
-# The permission mode a session was STARTED with, read off the claude command line:
-# the hook input does not carry one. bypassPermissions is recorded so a restore can say
-# it was dropped; what is replayed goes through Get-ClaudeArgs' allowlist regardless.
-function Get-StartPermissionMode {
-    param([string]$CommandLine)
-    $argv = Split-CommandLine $CommandLine
-    $mode = $null
-    for ($i = 1; $i -lt $argv.Count; $i++) {
-        $a = $argv[$i]
-        if ($a -ceq '--') { break }   # everything after it is the prompt
-        if ($a -ceq '--dangerously-skip-permissions') { return 'bypassPermissions' }
-        if ($a -ceq '--permission-mode' -and $i + 1 -lt $argv.Count) { $mode = $argv[++$i] }
-        elseif ($a.StartsWith('--permission-mode=', [StringComparison]::Ordinal)) { $mode = $a.Substring(18) }
-    }
-    # 'default' is Manual mode's config value: record the name --permission-mode lists for it
-    if ($mode -ceq 'default') { return 'manual' }
-    if ($mode -and $mode -cmatch '\A[A-Za-z]{1,32}\z') { return $mode }
-    return $null
-}
-
-function Set-OpenSessionRecord {
-    param(
-        [Parameter(Mandatory)][string]$SessionId,
-        [string]$Cwd,
-        [string]$TranscriptPath,
-        [string]$PermissionMode,
-        [string]$Source
-    )
-    # The id becomes a file name: nothing else may.
-    if (-not (Test-SessionIdFormat $SessionId)) { throw "Not a session id: $SessionId" }
-    # No shell is recorded: a restored session opens in a new tab running claude
-    # directly, never through a shell, where its paths and free text would be re-parsed.
-    $record = [ordered]@{
-        sessionId      = $SessionId
-        cwd            = $Cwd
-        transcriptPath = $TranscriptPath
-        startedAt      = (Get-Date).ToString('o')
-        permissionMode = $(if ($PermissionMode) { $PermissionMode } else { $null })
-        source         = $Source
-    } | ConvertTo-Json -Compress
-    $dir = Get-KitPath openSessions
-    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
-    $file = Join-Path $dir ($SessionId + '.json')
-    # Written aside and moved into place, so a reader never sees half a record.
-    [IO.File]::WriteAllText($file + '.tmp', $record, [Text.UTF8Encoding]::new($false))
-    [IO.File]::Move($file + '.tmp', $file, $true)
-}
-
-function Remove-OpenSessionRecord {
-    param([Parameter(Mandatory)][string]$SessionId)
-    if (-not (Test-SessionIdFormat $SessionId)) { throw "Not a session id: $SessionId" }
-    [IO.File]::Delete((Join-Path (Get-KitPath openSessions) ($SessionId + '.json')))   # absent is fine
-}
-
-# Rows: SessionId, Cwd, TranscriptPath, PermissionMode, Source.
-function Get-OpenSessionRecords {
-    foreach ($f in @(Get-ChildItem -LiteralPath (Get-KitPath openSessions) -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
-        if (-not (Test-SessionIdFormat $f.BaseName)) { continue }
-        try { $r = Get-Content -LiteralPath $f.FullName -Raw -Encoding UTF8 | ConvertFrom-Json -AsHashtable } catch { continue }
-        # The file name is the session id; a record that says otherwise is not believed.
-        if ($r -isnot [System.Collections.IDictionary] -or [string]$r['sessionId'] -ne $f.BaseName) { continue }
-        [pscustomobject]@{
-            SessionId = $f.BaseName; Cwd = [string]$r['cwd']; TranscriptPath = [string]$r['transcriptPath']
-            PermissionMode = [string]$r['permissionMode']; Source = [string]$r['source']
-        }
-    }
-}
-
-# --- resume target ladder -------------------------------------------------------------------
-#   1. explicit -SessionId       (must exist as a transcript; an id is never guessed)
-#   2. launcher registry         (sessions this kit opened, newest transcript first)
-#   3. transcript scan, -Days    (interactive CLI sessions only)
-#   4. the CLI's own picker      (only with -AllowPicker and a folder to open it in)
-# The folder a session is reopened in is always the one RECORDED for it:
-# `claude --resume <id>` finds a session from anywhere, and then works in whatever
-# directory it was started from.
+# --- resume target --------------------------------------------------------------------------
 # A session's transcript in whichever project folder holds it: /cd, EnterWorktree and
 # ExitWorktree move it to another folder's slug. $null when there is none.
 function Find-SessionTranscript {
@@ -801,72 +573,63 @@ function Find-SessionTranscript {
     return $null
 }
 
-# -RunningSessions (Get-RunningSessions rows) are skipped by the automatic steps: the
-# newest session in a folder is usually the one asking, and an open one cannot be
-# reopened anyway. An explicit -SessionId is not skipped; the launch refuses it.
-# -IncludeOpen skips nothing: a fork of an open session is a new conversation.
+# The session to reopen, in -Path when given:
+#   1. an explicit -SessionId (it must exist as an interactive transcript; never guessed)
+#   2. a session this kit opened (sessions.jsonl), the one written to last
+#   3. the newest interactive transcript of the last -Days days
+# -RunningSessions (Get-RunningSessions rows) and the asking session are skipped by
+# the automatic choice: the newest session is
+# usually the one asking, and an open one cannot be reopened anyway. An explicit id
+# is not skipped; the launch refuses it. SessionId is $null, with a Reason, when
+# there is nothing to reopen. The folder is always the one RECORDED for the session:
+# `claude --resume <id>` finds a session from anywhere, then works in whatever
+# directory it was started from.
 function Resolve-ResumeTarget {
     param(
         [string]$Path,
         [string]$SessionId,
         [int]$Days = 30,
-        [switch]$AllowPicker,
-        [object[]]$RunningSessions = @(),
-        [switch]$IncludeOpen
+        [object[]]$RunningSessions = @()
     )
-    $none = { param($reason) [pscustomobject]@{ Mode = 'none'; SessionId = $null; Cwd = $Path; Source = $null; Title = $null; Reason = $reason } }
+    $none = { param($reason) [pscustomobject]@{ SessionId = $null; Cwd = $Path; Title = $null; Reason = $reason } }
 
     if ($SessionId) {
         if (-not (Test-SessionIdFormat $SessionId)) { return (& $none "Not a session id: $SessionId") }
         $candidate = Find-SessionTranscript -SessionId $SessionId
-        $found = if ($candidate) { Get-ClaudeSessionRecord -TranscriptPath $candidate }
-        if (-not $found) { return (& $none "No transcript exists for session $SessionId.") }
+        if (-not $candidate) { return (& $none "No transcript exists for session $SessionId.") }
+        $found = Get-ClaudeSessionRecord -TranscriptPath $candidate
         if ($found.Kind -ne 'interactive') { return (& $none "Session $SessionId is '$($found.Kind)', not an interactive CLI session.") }
         $cwd = if ($found.Cwd) { $found.Cwd } else { $Path }
         if (-not $cwd) { return (& $none "Session $SessionId records no working directory.") }
-        return [pscustomobject]@{ Mode = 'resume-id'; SessionId = $SessionId; Cwd = $cwd; Source = 'explicit'; Title = $found.Title; Reason = $null }
+        return [pscustomobject]@{ SessionId = $SessionId; Cwd = $cwd; Title = $found.Title; Reason = $null }
     }
 
     $open = @{}
-    if (-not $IncludeOpen) {
-        foreach ($o in @($RunningSessions)) { if ($o -and $o.SessionId) { $open[[string]$o.SessionId] = $true } }
-        # The asking session is open whatever the CLI could tell us.
-        if ($env:CLAUDE_CODE_SESSION_ID) { $open[$env:CLAUDE_CODE_SESSION_ID] = $true }
-    }
-    $skipped = [System.Collections.Generic.HashSet[string]]::new()
-
+    foreach ($o in @($RunningSessions)) { if ($o -and $o.SessionId) { $open[[string]$o.SessionId] = $true } }
+    # The asking session is open whatever the CLI could tell us.
+    if ($env:CLAUDE_CODE_SESSION_ID) { $open[$env:CLAUDE_CODE_SESSION_ID] = $true }
     $best = $null
     foreach ($r in @(Get-RegisteredSessions -Days $Days)) {
-        if ($Path -and -not (Test-PathEqual $r.Cwd $Path)) { continue }
-        if ($open.ContainsKey($r.SessionId)) { [void]$skipped.Add($r.SessionId); continue }
+        if ($open.ContainsKey($r.SessionId) -or ($Path -and -not (Test-PathEqual $r.Cwd $Path))) { continue }
         $t = Join-Path (Get-ProjectTranscriptDir $r.Cwd) ($r.SessionId + '.jsonl')
         # Registered but never written: the person closed it before saying anything.
         if (-not (Test-Path -LiteralPath $t)) { continue }
         $rec = Get-ClaudeSessionRecord -TranscriptPath $t
-        if ($rec.Kind -ne 'interactive') { continue }
-        if (-not $best -or $rec.LastWrite -gt $best.LastWrite) {
+        if ($rec.Kind -eq 'interactive' -and (-not $best -or $rec.LastWrite -gt $best.LastWrite)) {
+            # the folder is the one recorded at launch
             $best = [pscustomobject]@{ SessionId = $r.SessionId; Cwd = $r.Cwd; LastWrite = $rec.LastWrite; Title = $rec.Title }
         }
     }
-    if ($best) {
-        return [pscustomobject]@{ Mode = 'resume-id'; SessionId = $best.SessionId; Cwd = $best.Cwd; Source = 'registry'; Title = $best.Title; Reason = $null }
-    }
+    if ($best) { return [pscustomobject]@{ SessionId = $best.SessionId; Cwd = $best.Cwd; Title = $best.Title; Reason = $null } }
 
-    $scanned = @(Get-ClaudeSessions -Path $Path -Days $Days)
-    foreach ($s in $scanned) {
-        if ($open.ContainsKey($s.SessionId)) { [void]$skipped.Add($s.SessionId); continue }
+    $skipped = 0
+    foreach ($s in @(Get-ClaudeSessions -Path $Path -Days $Days)) {
+        if ($open.ContainsKey($s.SessionId)) { $skipped++; continue }
         $cwd = if ($s.Cwd) { $s.Cwd } else { $Path }
         if (-not $cwd) { continue }
-        return [pscustomobject]@{ Mode = 'resume-id'; SessionId = $s.SessionId; Cwd = $cwd; Source = 'scan'; Title = $s.Title; Reason = $null }
+        return [pscustomobject]@{ SessionId = $s.SessionId; Cwd = $cwd; Title = $s.Title; Reason = $null }
     }
-
-    if ($AllowPicker -and $Path) {
-        return [pscustomobject]@{ Mode = 'picker'; SessionId = $null; Cwd = $Path; Source = 'picker'; Title = $null
-            Reason = "No registered or recent session for this folder; handing over to the CLI's own picker." }
-    }
-    if ($skipped.Count) {
-        return (& $none "No closed interactive session found in the last $Days days; $($skipped.Count) open right now (this one counts) were skipped.")
-    }
+    if ($skipped) { return (& $none "No closed interactive session found in the last $Days days; $skipped open right now (this one counts) were skipped.") }
     return (& $none "No resumable interactive session found in the last $Days days.")
 }
 

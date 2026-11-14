@@ -8,9 +8,7 @@ next-prompt*.txt
 resume-prompt.txt
 private-tokens.txt
 claude.json.before-trust
-open-sessions/
 runtime/
-archive/
 *.log
 *.log.1
 

@@ -1,14 +1,13 @@
 # claude-session-kit
 
 A [Claude Code](https://claude.com/claude-code) plugin for **Windows** with one skill,
-`claude-session-kit:session`, that runs the whole life of a session in Windows Terminal tabs:
+`claude-session-kit:session`, that opens, reopens and carries sessions in Windows Terminal tabs:
 
 | | You say | What happens |
 |---|---|---|
 | **Launch** | "open a new claude session", "open the `<alias>` folder on Opus xhigh and hand this off" | A new tab runs `claude` in a fresh scratch folder or a registered workspace, optionally named, on the model and effort you said, with a first prompt. |
-| **Resume** | "reopen my last session", "find the session where we talked about the deploy and reopen it" | An earlier session, picked from the registry, a list or a search, reopens in the folder recorded for it. |
+| **Resume** | "reopen my last session", "reopen the sessions I had open" | An earlier session, the last one the kit opened or one picked from a list, reopens in the folder recorded for it. |
 | **Reboot and continue** | "reboot and continue" | Windows restarts; after logon this session continues with a hand-off prompt, and the other open sessions come back in their own tabs. |
-| **Restore** | "reopen the sessions I had open" | Sessions lost to a crash or a closed window reopen, each with the permission mode it was started with. |
 
 What Claude is told to do, and every result `code`, is in [skills/session/SKILL.md](skills/session/SKILL.md)
 and `skills/session/references/`. Why a script does what it does is in its help block and comments.
@@ -16,13 +15,8 @@ and `skills/session/references/`. Why a script does what it does is in its help 
 ## Requirements
 
 Windows 10/11 · PowerShell 7 (`pwsh`; `-TrustFolder` and the tests need 7.5 or later) · Claude Code CLI
-(last checked on 2.1.312; `claude agents --json` needs 2.1.145 or later) · Windows Terminal (without it
+(last checked on 2.1.323, see [Tests](#tests); `claude agents --json` needs 2.1.145 or later) · Windows Terminal (without it
 a plain console window is used).
-
-While the plugin is enabled, its `SessionStart` and `SessionEnd` hooks run
-`skills/session/scripts/track-session.ps1` in **every** Claude Code session (about half a second of
-`pwsh` each, no output). They keep one small record per open interactive session under
-`open-sessions\`, which is what Restore reopens.
 
 ## Install
 
@@ -59,7 +53,7 @@ The tests enforce these. Do not trade one away for a feature.
   one-time token and nothing else. The commit takes nothing executable from `plan.json`: it
   re-renders the RunOnce command and refuses a plan that was edited, is over ten minutes old or is
   dated in the future.
-- **RunOnce points at a frozen copy**, `runtime\resume.ps1` in the state folder, because a plugin
+- **RunOnce points at a frozen copy** of `resume-after-reboot.ps1`, `runtime\resume.ps1` in the state folder, because a plugin
   update moves the versioned cache folder. That script is self-contained and loads nothing from `lib\`.
 - **An untrusted folder fails closed** (`UNTRUSTED_WORKSPACE`, with what the folder ships).
   `-TrustFolder` is the kit's only write to `~/.claude.json`: under Claude Code's own lock, one key,
@@ -70,7 +64,7 @@ The tests enforce these. Do not trade one away for a feature.
   Terminal would change (a `"`, a `%NAME%` pair, a tab, a trailing backslash) are refused, not
   repaired: `Get-PromptRefusal` holds what was measured by hand on Windows Terminal 1.24. Behind an
   npm `.cmd` shim a launch prompt is refused, and a reboot prompt travels in `resume-prompt.txt`.
-- **The kit never picks a model, an effort or a permission mode**, and never replays `bypassPermissions`.
+- **The kit never picks a model, an effort or a permission mode.**
 - **A launched tab is a top-level session**: the asking session's environment markers
   (`$script:InheritedSessionVariables`) are dropped first, or the new `claude` saves no transcript.
 - **Nothing personal is in the repository.** Aliases and state live in the state folder, and the tests
@@ -83,13 +77,16 @@ Everything is in `%USERPROFILE%\.claude\claude-session-kit\`:
 | File | Holds |
 |---|---|
 | `aliases.json` | your workspace aliases |
-| `sessions.jsonl` | the registry of sessions the kit opened, which Resume reads first |
-| `open-sessions\` | one record per open interactive session, written by the hooks |
+| `sessions.jsonl` | the sessions the kit opened (id, folder, time), which Resume reads first |
 | `plan.json`, `state.json`, `state.last.json` | a planned, a pending and the last reboot resume; they hold the hand-off prompt |
 | `runtime\resume.ps1`, `resume-prompt.txt` | the frozen logon script; the prompt file used only with a `.cmd` shim |
 | `claude.json.before-trust` | `~/.claude.json` as it was before the last `-TrustFolder` write |
-| `archive\` | plain copies of transcripts, only if you run `archive-sessions.ps1` |
+| `private-tokens.txt` | words the tests must never find in the repository, one per line |
 | `kit.log`, `kit.log.1` | the log and its previous megabyte |
+
+`sessions.jsonl` is what makes "my last session" mean the last one the kit opened: the newest
+transcript under `~/.claude/projects` is usually another tool's. `claude agents --json` says which
+sessions are open now.
 
 Hand-off notes are written to the asking session's scratchpad under `%TEMP%\claude\`, so do not empty
 Temp while a hand-off session still works. Asking which sessions are open runs `claude agents --json`,
@@ -103,20 +100,15 @@ exits 0 when done, 1 when refused, 2 on an internal error.
 | Script | Does | Side effects |
 |---|---|---|
 | `list-aliases.ps1` | the alias table | none |
-| `list-sessions.ps1` | sessions that could be resumed, with title, `running` and the retention setting | none |
-| `search-sessions.ps1 -Query:` | sessions by title, folder name or message text | none |
-| `list-candidates.ps1` | most-used folders (`alias` is set on those already registered) | none |
+| `list-sessions.ps1 [-Alias\|-Path] [-Days] [-Top]` | sessions that could be resumed, with title, `source` (opened by the kit or not) and `running` | none |
 | `new-temp-task.ps1 [-Name] [-Model] [-Effort] [-Prompt:]` | new scratch folder + new session | folder, terminal tab |
 | `open-workspace.ps1 -Alias\|-Path [-Name] [-Model] [-Effort] [-Prompt:]` | new session in a workspace | terminal tab |
-| `resume-session.ps1 [-Alias\|-Path] [-SessionId] [-Fork] [-NoPicker]` | reopen a session | terminal tab |
-| `restore-open.ps1 [-All\|-Ids\|-Forget\|-ForgetAll]` | sessions left open by a crash or closed window | terminal tabs; prunes records that can never be reopened; `-Forget` deletes records |
-| `archive-sessions.ps1 [-All] [-List]` | back up transcripts before Claude Code's `cleanupPeriodDays` deletes them | copies into `archive\` |
-| `reboot-plan.ps1` | plan a reboot-and-resume | writes `plan.json` only |
+| `resume-session.ps1 [-Alias\|-Path] [-SessionId] [-Days]` | reopen a session | terminal tab |
+| `reboot-plan.ps1 [-WorkDir] [-PromptFile] [-SessionId] [-OnlyThis] [-NoReboot]` | plan a reboot-and-resume | writes `plan.json` only |
 | `reboot-commit.ps1 -Token` | **register + reboot** | RunOnce, `shutdown /r` |
 | `reboot-cancel.ps1 [-Status]` | cancel / inspect | removes its own RunOnce + state |
-| `track-session.ps1` | the SessionStart/SessionEnd hook (not for direct use) | writes/deletes `open-sessions\<id>.json` |
 
-`-TrustFolder` is taken by the four scripts that open a tab.
+`-TrustFolder` is taken by the three scripts that open a tab.
 
 ## Tests
 
@@ -130,9 +122,33 @@ No Pester, no network; PowerShell 7.5 or later. Everything runs in a throwaway s
 `claude agents --json` and record the argv they get.
 
 Not covered, on purpose: Windows PowerShell 5.1 or Legacy argument mode as the logon host, the
-console fallback without Windows Terminal, the search fallback without `rg`, the PID-record fallback
-when `claude agents --json` fails, and v1 (flat) alias files. What Windows Terminal does to a prompt
-when it rebuilds the tab's command line cannot be seen by a stand-in either.
+console fallback without Windows Terminal, the PID-record fallback when `claude agents --json`
+fails, and `reboot-cancel.ps1` without `-Status` (it would abort a real pending shutdown). What
+Windows Terminal does to a prompt when it rebuilds the tab's command line cannot be seen by a
+stand-in either.
+
+Checked by hand on 2026-11-14 with Claude Code 2.1.323, Windows Terminal 1.24 and PowerShell 7.7.0,
+because the suite cannot: repeat these after a Claude Code or Windows Terminal update.
+
+- **A real tab.** `new-temp-task.ps1 -Name -Model -Effort -Prompt:` returned `LAUNCHED`; `claude.exe`
+  ran under `WindowsTerminal.exe` in the new folder with the name given, saved an interactive
+  transcript whose first message was the prompt, answered it, and was added to `sessions.jsonl`.
+  `open-workspace.ps1 -Path -Name` opened a tab in an existing folder the same way (without a prompt).
+- **"My last session".** With that session closed, `resume-session.ps1` without arguments reopened it
+  in its folder (`RESUMED`); with it open, `-SessionId` got `ALREADY_RUNNING`. That run alone cannot
+  show the launch list winning over newer transcripts. That was checked read-only against the real
+  session list: the rule chose the session the kit had opened last although 33 closed sessions
+  started some other way were newer, and with the launch list taken out it chose one of those.
+- **Cancel.** After a `-NoReboot` commit had written the real RunOnce value and `state.json`, and
+  with a restart pending (`shutdown /r /t 600`, scheduled by hand), `reboot-cancel.ps1` aborted the
+  restart and removed both (`CANCELLED`); a second run said `NOTHING_PENDING`.
+- **Reboot and continue.** `reboot-plan.ps1`, then `reboot-commit.ps1 -Token` (`REBOOT_SCHEDULED`):
+  Windows logged the restart request from `shutdown.exe` at the commit and was back up 82 seconds
+  later. After logon RunOnce opened a terminal by itself. The planned session resumed in its folder
+  (`claude.exe` under `pwsh.exe` under `WindowsTerminal.exe`) with the 2,374-character hand-off note
+  as its next message, unchanged; the other open session came back in a tab of its own without a
+  prompt; three background sessions were skipped (`NOT_INTERACTIVE`). The RunOnce value was gone and
+  `state.json` had become `state.last.json`.
 
 To release, set the same `version` in `.claude-plugin/plugin.json` and twice in
 `.claude-plugin/marketplace.json`; a test checks that they agree.
@@ -146,8 +162,7 @@ pwsh -NoProfile -File "$env:USERPROFILE\.claude\skills\claude-session-kit\skills
 ```
 
 Then delete the cloned folder (or `claude plugin uninstall claude-session-kit@claude-session-kit`) and
-`%USERPROFILE%\.claude\claude-session-kit`. That state folder includes `archive\`, the only copy of any
-transcript Claude Code has since cleaned up, so move it first if you want to keep it.
+`%USERPROFILE%\.claude\claude-session-kit`.
 
 ## License
 

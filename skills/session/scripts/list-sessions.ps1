@@ -4,15 +4,15 @@
   Lists sessions that resume-session.ps1 could reopen. Read-only.
 
 .DESCRIPTION
-  Registry entries first (sessions this kit opened), then interactive transcripts
-  from the last -Days days, de-duplicated, newest first. Scheduled and SDK
-  transcripts never appear. Message bodies are never read out, with one exception:
-  a session the CLI recorded no title for is titled by the start of its first
-  prompt (titleSource "prompt"; the others are "custom" for /rename or --name, and
-  "ai"). A registered name stands in until the transcript records a custom title.
+  Interactive transcripts from the last -Days days, newest first, in the -Alias or
+  -Path folder when one is given. Scheduled and SDK transcripts never appear.
+  Message bodies are never read out, with one exception: a session with no name
+  (/rename, --name) and no summary of the CLI's own is titled by the start of its
+  first prompt.
 
-  retentionDays is how long Claude Code keeps transcripts (cleanupPeriodDays); at 30
-  or less, `warning` says how to keep older ones.
+  Per row: sessionId, cwd, alias (when the folder is a registered one), title,
+  lastWrite, source (registry: this kit opened it, so resume-session.ps1 prefers it;
+  scan: any other), cwdExists, running (open right now).
 
   Prints one JSON object. code: SESSIONS | ALIAS_NOT_FOUND | PATH_NOT_FOUND
 #>
@@ -32,52 +32,29 @@ try {
 
     $where = Resolve-AliasOrPath -Alias $Alias -Path $Path
     if ($where.Refusal) { Exit-WithResult $where.Refusal }
-    $scope = $where.Scope
 
-    $seen = @{}
-    $rows = [System.Collections.Generic.List[object]]::new()
-
-    foreach ($r in @(Get-RegisteredSessions -Days $Days)) {
-        if ($scope -and -not (Test-PathEqual $r.Cwd $scope)) { continue }
-        if ($seen.ContainsKey($r.SessionId)) { continue }
-        $t = Join-Path (Get-ProjectTranscriptDir $r.Cwd) ($r.SessionId + '.jsonl')
-        if (-not (Test-Path -LiteralPath $t)) { continue }
-        $rec = Get-ClaudeSessionRecord -TranscriptPath $t
-        if ($rec.Kind -ne 'interactive') { continue }
-        $seen[$r.SessionId] = $true
-        # a custom title in the transcript (a later /rename) beats the name given at launch
-        $title, $titleSource = if ($r.Name -and $rec.TitleSource -ne 'custom') { $r.Name, 'custom' } else { $rec.Title, $rec.TitleSource }
-        $rows.Add([pscustomobject]@{ sessionId = $r.SessionId; cwd = $r.Cwd; alias = $r.Alias; title = $title; titleSource = $titleSource; lastWrite = $rec.LastWrite; source = 'registry' })
+    $aliased = @{}
+    # decoration only: a broken aliases.json still fails -Alias above, but not a plain list
+    foreach ($a in @(try { Get-AliasTable } catch { @() })) {
+        try { $aliased[(ConvertTo-NormalizedPath $a.path).ToLowerInvariant()] = $a.name } catch {}
     }
-    foreach ($s in @(Get-ClaudeSessions -Path $scope -Days $Days)) {
-        if ($seen.ContainsKey($s.SessionId) -or -not $s.Cwd) { continue }
-        $seen[$s.SessionId] = $true
-        $rows.Add([pscustomobject]@{ sessionId = $s.SessionId; cwd = $s.Cwd; alias = $null; title = $s.Title; titleSource = $s.TitleSource; lastWrite = $s.LastWrite; source = 'scan' })
-    }
-
     $running = @{}
     foreach ($r in @(Get-RunningSessions)) { $running[$r.SessionId] = $true }
-    $sorted = @($rows | Sort-Object lastWrite -Descending | Select-Object -First $Top | ForEach-Object {
+    $kit = @{}
+    foreach ($r in @(Get-RegisteredSessions -Days $Days)) { $kit[$r.SessionId] = $true }
+
+    # no recorded folder: nowhere to reopen it
+    $all = @(Get-ClaudeSessions -Path $where.Scope -Days $Days | Where-Object Cwd)
+    $rows = @($all | Select-Object -First $Top | ForEach-Object {
             [ordered]@{
-                sessionId = $_.sessionId; cwd = $_.cwd; alias = $_.alias; title = $_.title; titleSource = $_.titleSource
-                lastWrite = $_.lastWrite.ToString('yyyy-MM-dd HH:mm'); source = $_.source
-                cwdExists = [bool](Test-Path -LiteralPath $_.cwd -PathType Container)
-                running = $running.ContainsKey($_.sessionId)
+                sessionId = $_.SessionId; cwd = $_.Cwd; alias = $aliased[(ConvertTo-NormalizedPath $_.Cwd).ToLowerInvariant()]
+                title = $_.Title; lastWrite = $_.LastWrite.ToString('yyyy-MM-dd HH:mm')
+                source = $(if ($kit.ContainsKey($_.SessionId)) { 'registry' } else { 'scan' })
+                cwdExists = [bool](Test-Path -LiteralPath $_.Cwd -PathType Container)
+                running = $running.ContainsKey($_.SessionId)
             }
         })
-    $result = [ordered]@{ ok = $true; code = 'SESSIONS'; scope = $scope; days = $Days; total = $rows.Count; sessions = $sorted }
-    $retention = Get-TranscriptRetention
-    $result.retentionDays = $retention.Days
-    # first: $null -le 30 is true
-    if ($retention.Source -eq 'invalid') {
-        $result.warning = ('cleanupPeriodDays in {0} is not a whole number of 1 or more, or the file is not strict JSON (no comments or trailing commas). ' +
-            'Claude Code reports a settings error until it is fixed; use a large whole number such as 3650.') -f (Join-Path (Get-ClaudeHome) 'settings.json')
-    } elseif ($retention.Days -le 30) {
-        $result.warning = ("Claude Code deletes transcripts older than {0} days, and a deleted session can no longer be listed, searched or resumed. " +
-            "To keep them, raise cleanupPeriodDays in {1} to a large value such as 3650 (never 0: rejected since v2.1.89, and older versions took it as 'save no transcripts'), " +
-            'or back them up with archive-sessions.ps1.') -f $retention.Days, (Join-Path (Get-ClaudeHome) 'settings.json')
-    }
-    Exit-WithResult $result
+    Exit-WithResult ([ordered]@{ ok = $true; code = 'SESSIONS'; scope = $where.Scope; days = $Days; total = $all.Count; sessions = $rows })
 } catch {
     Write-KitResult -Ok $false -Code 'INTERNAL_ERROR' -Message $_.Exception.Message
     exit 2

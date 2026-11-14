@@ -48,13 +48,14 @@ Step 1 — the user's explicit approval — is in SKILL.md §3 and must already 
      the primary receives the hand-off. `skipped` lists excluded sessions and reasons, including
      any cut by the cap. Other folders must already be trusted. Add `-OnlyThis` when only the
      primary should return. `IDLE` means the session is still running but its transcript has not
-     been written for over `-MaxIdleHours` (default 24) — typically a claude left in a terminal
-     the user no longer sees. Name those (title, `lastWrite`) and say they will not come back;
-     plan again with a larger `-MaxIdleHours` only if the user wants them.
+     been written for over 24 hours — typically a claude left in a terminal the user no longer
+     sees. Name those (title, `lastWrite`) and say they will not come back by themselves; after
+     the restart any of them can be reopened with `resume-session.ps1 -SessionId` (SKILL.md §2).
    - `RESUME_PENDING` (`ok=false`) means `state.json` already holds a registered resume; report
-     its `sessionId`, `workdir` and `createdAt`. Use `-Replace` only when replacing it is intended.
+     its `sessionId`, `workdir` and `createdAt`. Only when replacing it is intended, cancel it
+     (SKILL.md §4) and plan again.
    - `PROMPT_STALE` (`ok=false`) means the prompt file is over 30 minutes old (or dated in the
-     future). Rewrite the hand-off; `-AllowStalePrompt` explicitly permits reusing it.
+     future). Rewrite the hand-off and plan again.
 
    If the user wants to restart by hand, add `-NoReboot` (registers only). The `alsoResume` list is
    fixed at plan time: those sessions reopen at that logon even if they are closed in between, so
@@ -80,7 +81,7 @@ Step 1 — the user's explicit approval — is in SKILL.md §3 and must already 
 
 Notes:
 
-- The delay cannot go below 30 seconds (other apps may hold unsaved work).
+- The restart comes 30 seconds after the commit (other apps may hold unsaved work).
 - Permission prompts behave as usual in the resumed session (nothing is auto-approved).
 - **Scheduled and SDK sessions are never resume targets.** They pile up in the same project folder and
   are often the newest, but only interactive transcripts are candidates — plus this session's own

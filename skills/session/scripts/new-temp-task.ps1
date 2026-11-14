@@ -80,7 +80,7 @@ try {
     }
     if (-not $newDir) { throw "Could not create a scratch folder under $root." }
 
-    $result = Invoke-SessionLaunch -WorkDir $newDir -Mode new -Source new -Name $Name -Model $Model -Effort $Effort -Prompt $Prompt -TrustFolder:$TrustFolder
+    $result = Invoke-SessionLaunch -WorkDir $newDir -Mode new -Name $Name -Model $Model -Effort $Effort -Prompt $Prompt -TrustFolder:$TrustFolder
     # Nothing was opened, so the folder made for it goes too (Delete refuses a folder that is not empty).
     if (-not $result['ok']) { try { [IO.Directory]::Delete($newDir) } catch {} }
     Exit-WithResult $result

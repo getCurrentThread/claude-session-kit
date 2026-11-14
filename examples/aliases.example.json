@@ -1,5 +1,4 @@
 {
-  "version": 2,
   "tempTask": { "root": "%USERPROFILE%\\Downloads", "prefix": "test" },
   "aliases": {
     "blog": {

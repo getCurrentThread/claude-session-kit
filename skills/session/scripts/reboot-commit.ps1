@@ -135,8 +135,7 @@ try {
     if ($wtExe) { $runOnce = (& $quote $wtExe) + ' -w new nt -- ' + $runOnce }
     if ($runOnce.Length -gt 260) { & $invalid 'The RunOnce command would exceed 260 characters.' }
 
-    $delay = [int]$plan.delay_seconds
-    if ($delay -lt 30) { $delay = 30 }
+    $delay = 30   # seconds before the restart: other apps may hold unsaved work
 
     # 1. frozen, version-independent copy of the resume script
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $runtimeScript) | Out-Null

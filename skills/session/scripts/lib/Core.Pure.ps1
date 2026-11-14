@@ -82,12 +82,14 @@ function Get-TranscriptHeadInfo {
         }
         if (-not $sessionId -and $line -match '"sessionId"\s*:\s*"([^"]+)"') { $sessionId = $Matches[1] }
         if (-not $prompt -and $line -match '"type"\s*:\s*"user"') {
-            $text = Get-MessageText -Line $line -Roles user
+            $text = Get-TypedText -Line $line
             # '<' opens the CLI's own wrappers (<command-name>, ...) and this its Esc marker: neither is a prompt.
             # A record marked typed is what the person typed, '<' or not; the wrappers carry no promptSource.
             $typed = $line -match '"promptSource"\s*:\s*"typed"'
             if ($text -and ($typed -or -not $text.TrimStart().StartsWith('<')) -and -not $text.StartsWith('[Request interrupted by user')) {
-                $prompt = ConvertTo-OneLine -Text $text -Max 80
+                # one line of at most 80 characters, never ending on half an emoji
+                $prompt = ($text -replace '\s+', ' ').Trim()
+                if ($prompt.Length -gt 80) { $prompt = $prompt.Substring(0, $(if ([char]::IsHighSurrogate($prompt[76])) { 76 } else { 77 })) + '...' }
             }
         }
     }
@@ -103,11 +105,6 @@ function Get-TranscriptHeadInfo {
         elseif ($r['type'] -eq 'relocated' -and $r['relocatedCwd']) { $relocated = [string]$r['relocatedCwd'] }
     }
     if ($relocated) { $cwd = $relocated }
-    $title, $titleSource =
-        if ($custom) { $custom, 'custom' }
-        elseif ($ai) { $ai, 'ai' }
-        elseif ($prompt) { $prompt, 'prompt' }
-        else { $null, $null }
 
     $kind =
         if ($entrypoint -eq 'cli') { 'interactive' }
@@ -119,19 +116,18 @@ function Get-TranscriptHeadInfo {
         else { 'unknown' }
 
     return [pscustomobject]@{
-        Kind = $kind; Entrypoint = $entrypoint; Cwd = $cwd; SessionId = $sessionId; Title = $title; TitleSource = $titleSource
+        Kind = $kind; Cwd = $cwd
+        Title = $(if ($custom) { $custom } elseif ($ai) { $ai } else { $prompt })
     }
 }
 
-# The words of a conversation: what the person typed and what the assistant wrote
-# back. Tool calls, tool output, thinking and injected meta messages are not words,
-# nor is what the CLI itself files as "user": compaction summaries, task
-# notifications (promptSource "system") and shell or slash-command output.
-function Get-MessageText {
-    param([string]$Line, [string[]]$Roles = @('user', 'assistant'))
-    if (-not $Line) { return $null }
+# What the person typed in a "user" record, or $null. Tool output and injected meta
+# messages are not typed, nor is what the CLI itself files as "user": compaction
+# summaries, task notifications (promptSource "system") and shell or slash-command output.
+function Get-TypedText {
+    param([string]$Line)
     try { $r = $Line | ConvertFrom-Json -AsHashtable } catch { return $null }
-    if ($r -isnot [System.Collections.IDictionary] -or $r['type'] -notin $Roles -or $r['isMeta'] -eq $true -or
+    if ($r -isnot [System.Collections.IDictionary] -or $r['type'] -ne 'user' -or $r['isMeta'] -eq $true -or
         $r['isCompactSummary'] -eq $true -or $r['promptSource'] -eq 'system') { return $null }
     $m = $r['message']
     if ($m -isnot [System.Collections.IDictionary]) { return $null }
@@ -141,37 +137,14 @@ function Get-MessageText {
                 if ($b -is [System.Collections.IDictionary] -and $b['type'] -eq 'text' -and $b['text']) { [string]$b['text'] }
             }) -join "`n"
     }
-    if (-not $text -or ($r['type'] -eq 'user' -and $text -match '\A\s*<(bash-std|local-command-std|task-notification)')) { return $null }
+    if (-not $text -or $text -match '\A\s*<(bash-std|local-command-std|task-notification)') { return $null }
     return $text
-}
-
-# One line of at most -Max characters: whitespace runs become one space, and a cut
-# is marked with '...'. With -Term the window keeps that term's first occurrence.
-function ConvertTo-OneLine {
-    param([AllowEmptyString()][string]$Text, [int]$Max = 80, [string]$Term)
-    $flat = ($Text -replace '\s+', ' ').Trim()
-    if ($flat.Length -le $Max) { return $flat }
-    $at = if ($Term) { $flat.IndexOf($Term, [StringComparison]::OrdinalIgnoreCase) } else { -1 }
-    $start = [Math]::Max(0, $at - 40)
-    $lead = if ($start -gt 0) { '...' } else { '' }
-    $len = $Max - $lead.Length
-    $trail = ''
-    if ($start + $len -lt $flat.Length) { $len -= 3; $trail = '...' }
-    else { $len = $flat.Length - $start }
-    # never split a surrogate pair: half an emoji is not valid UTF-8
-    if ($start -gt 0 -and [char]::IsLowSurrogate($flat[$start])) { $start++; $len-- }
-    if ($len -gt 0 -and [char]::IsHighSurrogate($flat[$start + $len - 1])) { $len-- }
-    return ($lead + $flat.Substring($start, $len) + $trail)
 }
 
 # --- claude argv -----------------------------------------------------------------
 # `--continue` cannot be expressed here, on purpose: it reopens whatever
 # conversation is newest in the folder, which may be a scheduled run's.
-#
-# -PermissionMode only REPLAYS a mode a person already chose for that session; the
-# kit never picks one. bypassPermissions is refused even as a replay: reopening a
-# tab must not be the step that turns every permission prompt off.
-$script:ReplayablePermissionModes = @('acceptEdits', 'auto', 'manual', 'dontAsk', 'plan')
+# Nor can a permission mode: the kit never picks one.
 
 # A session name rides on wt's command line, and wt rebuilds the child's command line
 # quoting only on spaces and escaping nothing, then expands %VAR%; behind a .cmd shim
@@ -226,68 +199,33 @@ function Get-PromptRefusal([string]$Prompt) {
     }
 }
 
+# new:    [--name N] [--model M] [--effort E] --session-id <id> [-- <prompt>]
+# resume: --resume <id>
 function Get-ClaudeArgs {
     param(
-        [Parameter(Mandatory)][ValidateSet('new', 'resume', 'picker')][string]$Mode,
-        [string]$SessionId,
+        [Parameter(Mandatory)][ValidateSet('new', 'resume')][string]$Mode,
+        [Parameter(Mandatory)][string]$SessionId,
         [string]$Prompt,
         [string]$Name,
         [string]$Model,
-        [string]$Effort,
-        [string]$PermissionMode,
-        [switch]$Fork,
-        # the id the fork is created under (the CLI takes --session-id with --resume only alongside --fork-session)
-        [string]$ForkSessionId
+        [string]$Effort
     )
-
+    if (-not (Test-SessionIdFormat $SessionId)) { throw "Not a session id: $SessionId" }
+    if ($Mode -eq 'resume') {
+        if ($Prompt -or $Name -or $Model -or $Effort) { throw 'A resumed session takes no name, model, effort or prompt.' }
+        return , @('--resume', $SessionId)
+    }
+    # the message never holds the prompt: a script relays it as INTERNAL_ERROR
+    foreach ($refusal in (Get-NameRefusal $Name), (Get-ModelRefusal $Model), (Get-EffortRefusal $Effort), (Get-PromptRefusal $Prompt)) {
+        if ($refusal) { throw $refusal.message }
+    }
     $argv = [System.Collections.Generic.List[string]]::new()
-    if ($PermissionMode) {
-        if ($PermissionMode -cnotin $script:ReplayablePermissionModes) { throw "Permission mode '$PermissionMode' is never replayed." }
-        $argv.Add('--permission-mode'); $argv.Add($PermissionMode)
-    }
-    if ($Name) {
-        if (Get-NameRefusal $Name) { throw (Get-NameRefusal $Name).message }
-        $argv.Add('--name'); $argv.Add($Name)
-    }
-    if ($Model) {
-        if (Get-ModelRefusal $Model) { throw (Get-ModelRefusal $Model).message }
-        $argv.Add('--model'); $argv.Add($Model)
-    }
-    if ($Effort) {
-        if (Get-EffortRefusal $Effort) { throw (Get-EffortRefusal $Effort).message }
-        $argv.Add('--effort'); $argv.Add($Effort)
-    }
-    switch ($Mode) {
-        'new' {
-            if ($SessionId) {
-                if (-not (Test-SessionIdFormat $SessionId)) { throw "Not a session id: $SessionId" }
-                $argv.Add('--session-id'); $argv.Add($SessionId)
-            }
-        }
-        'resume' {
-            if (-not (Test-SessionIdFormat $SessionId)) { throw "Mode 'resume' needs a session id, got: '$SessionId'" }
-            $argv.Add('--resume'); $argv.Add($SessionId)
-            if ($Fork) {
-                $argv.Add('--fork-session')
-                if ($ForkSessionId) {
-                    if (-not (Test-SessionIdFormat $ForkSessionId)) { throw "Not a session id: $ForkSessionId" }
-                    $argv.Add('--session-id'); $argv.Add($ForkSessionId)
-                }
-            }
-        }
-        'picker' {
-            if ($Prompt) { throw "Mode 'picker' cannot carry a prompt." }
-            $argv.Add('--resume')
-            if ($Fork) { $argv.Add('--fork-session') }
-        }
-    }
-    if ($Prompt) {
-        # the message never holds the prompt: a script relays it as INTERNAL_ERROR
-        if (Get-PromptRefusal $Prompt) { throw (Get-PromptRefusal $Prompt).message }
-        # `--resume` takes an OPTIONAL value, so a bare prompt is liable to be
-        # consumed as the resume target. '--' ends option parsing.
-        $argv.Add('--'); $argv.Add($Prompt)
-    }
+    if ($Name) { $argv.Add('--name'); $argv.Add($Name) }
+    if ($Model) { $argv.Add('--model'); $argv.Add($Model) }
+    if ($Effort) { $argv.Add('--effort'); $argv.Add($Effort) }
+    $argv.Add('--session-id'); $argv.Add($SessionId)
+    # '--' ends option parsing, so a prompt that starts with '-' stays a prompt.
+    if ($Prompt) { $argv.Add('--'); $argv.Add($Prompt) }
     return , $argv.ToArray()
 }
 
@@ -413,40 +351,19 @@ function Get-NextTempIndex {
 }
 
 # --- alias documents -----------------------------------------------------------------
-# Accepts both shapes of aliases.json:
-#   v1  { "<name>": "<path>", ... }
-#   v2  { "version": 2, "aliases": { "<name>": { "path", "triggers", "note", "confirm" } } }
-# Members are read through PSObject.Properties, never `$doc.$name`, so an alias
-# called Count or Length resolves to the alias and not to a built-in member.
+# aliases.json: { "aliases": { "<name>": { "path", "triggers", "note", "confirm" } } }
+# Read as hashtables, so an alias called Count or Length is the alias and not a
+# built-in member. Streams the rows: callers collect them with @( ).
 function ConvertFrom-AliasDocument {
-    param([Parameter(Mandatory)]$Document)
-
-    $source = $Document
-    $isV2 = $false
-    $aliasesProp = $Document.PSObject.Properties | Where-Object { $_.Name -eq 'aliases' } | Select-Object -First 1
-    if ($aliasesProp -and $aliasesProp.Value -is [pscustomobject]) { $source = $aliasesProp.Value; $isV2 = $true }
-
-    $out = [System.Collections.Generic.List[object]]::new()
-    foreach ($p in $source.PSObject.Properties) {
-        if (-not $isV2 -and $p.Name -in @('version', 'tempTask')) { continue }
-        $path = $null; $triggers = @(); $note = $null; $confirm = $false
-        if ($p.Value -is [string]) {
-            $path = $p.Value
-        } elseif ($p.Value -is [pscustomobject]) {
-            foreach ($f in $p.Value.PSObject.Properties) {
-                switch ($f.Name) {
-                    'path' { $path = [string]$f.Value }
-                    'triggers' { $triggers = @($f.Value | ForEach-Object { [string]$_ }) }
-                    'note' { $note = [string]$f.Value }
-                    'confirm' { $confirm = [bool]$f.Value }
-                }
-            }
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$Document)
+    $aliases = $Document['aliases']
+    if ($aliases -isnot [System.Collections.IDictionary]) { return }
+    foreach ($name in $aliases.Keys) {
+        $a = $aliases[$name]
+        if ($a -isnot [System.Collections.IDictionary] -or [string]::IsNullOrWhiteSpace([string]$a['path'])) { continue }
+        [pscustomobject]@{
+            name = [string]$name; path = [string]$a['path']; triggers = @($a['triggers'] | Where-Object { $_ } | ForEach-Object { [string]$_ })
+            note = $(if ($a['note']) { [string]$a['note'] } else { $null }); confirm = [bool]$a['confirm']
         }
-        if ([string]::IsNullOrWhiteSpace($path)) { continue }
-        $out.Add([pscustomobject]@{
-                name = $p.Name; path = $path; triggers = $triggers; note = $note; confirm = $confirm
-            })
     }
-    # Streams the rows (no `, ` wrapper): callers collect them with @( ).
-    return $out.ToArray()
 }

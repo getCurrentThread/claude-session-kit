@@ -51,7 +51,7 @@ try {
     $where = Resolve-AliasOrPath -Alias $Alias -Path $Path -Suffix ' Nothing was opened.'
     if ($where.Refusal) { Exit-WithResult $where.Refusal }
 
-    Exit-WithResult (Invoke-SessionLaunch -WorkDir $where.Scope -Mode new -Alias $where.Alias -Source open -Name $Name -Model $Model -Effort $Effort -Prompt $Prompt -TrustFolder:$TrustFolder)
+    Exit-WithResult (Invoke-SessionLaunch -WorkDir $where.Scope -Mode new -Alias $where.Alias -Name $Name -Model $Model -Effort $Effort -Prompt $Prompt -TrustFolder:$TrustFolder)
 } catch {
     Write-KitResult -Ok $false -Code 'INTERNAL_ERROR' -Message $_.Exception.Message
     exit 2

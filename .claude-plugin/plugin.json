@@ -1,7 +1,7 @@
 {
   "name": "claude-session-kit",
   "version": "0.4.0",
-  "description": "Windows session tools for Claude Code: open a new session in a workspace folder, find and reopen an earlier one, carry sessions across a reboot, and bring them back after a crash.",
+  "description": "Windows session tools for Claude Code: open a new session in a workspace folder, reopen an earlier one, and carry sessions across a reboot.",
   "author": {
     "name": "getCurrentThread"
   },
@@ -14,8 +14,6 @@
     "windows-terminal",
     "session",
     "resume",
-    "reboot",
-    "restore",
-    "hooks"
+    "reboot"
   ]
 }
