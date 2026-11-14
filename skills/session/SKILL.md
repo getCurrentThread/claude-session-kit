@@ -153,7 +153,9 @@ before the last trust write is kept in the state folder as `claude.json.before-t
 ### Other codes
 
 `ALIAS_NOT_FOUND` (`known` lists the registered names), `NO_ALIASES`, `PATH_NOT_FOUND` — do not guess
-a path; ask the user. `CLAUDE_NOT_FOUND` — the `claude` executable could not be located.
+a path; ask the user. A folder whose name differs from what the user said by a hyphen, a space or a
+suffix is another folder: list the ones that exist and ask, never open one in its place.
+`CLAUDE_NOT_FOUND` — the `claude` executable could not be located.
 `INVALID_MODEL`, `INVALID_EFFORT`, `INVALID_PROMPT`, `CLAUDE_IS_SHIM` — see `references/handoff.md`.
 
 ## 2. Resume — reopen an earlier session
